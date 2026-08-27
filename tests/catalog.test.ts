@@ -54,6 +54,7 @@ describe("schema-v3 catalog", () => {
 
   it("uses stable IDs and rejects catalog drift", async () => {
     const value = await catalog();
+    expect(value.catalog_version).toBe("clean-room-v1-09bc7091dc31fa02");
     const deepLink = value.queries.find((query) => query.query === "deep link")!;
     expect(deepLink.query_id).toBe(await stableQueryId("  DEEP   LINK ", "raw"));
     expect(await catalogHash(value.queries)).toBe(value.catalog_version);

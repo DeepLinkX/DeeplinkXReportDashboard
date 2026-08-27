@@ -79,6 +79,10 @@ export async function validateSourceRepository(input: string): Promise<string> {
     requirePath(repositoryRoot, "README.md"),
     requirePath(repositoryRoot, path.join("doc", "apps"), true),
   ]);
+  const pubspecText = await fs.readFile(path.join(repositoryRoot, "pubspec.yaml"), "utf8");
+  if (parseScalar(pubspecText, "name") !== PACKAGE_NAME) {
+    throw new Error(`--source-repo must be the ${PACKAGE_NAME} product repository.`);
+  }
 
   let gitRoot: string;
   try {

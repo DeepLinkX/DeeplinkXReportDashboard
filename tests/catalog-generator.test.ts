@@ -64,6 +64,15 @@ describe("standalone catalog generation", () => {
     await expect(validateSourceRepository(root)).rejects.toThrow(/product evidence is dirty/);
   });
 
+  it("rejects a different product repository even when evidence paths exist", async () => {
+    const root = await productFixture();
+    const pubspec = path.join(root, "pubspec.yaml");
+    await fs.writeFile(pubspec, (await fs.readFile(pubspec, "utf8")).replace("name: deeplink_x", "name: another_package"));
+    execFileSync("git", ["add", "pubspec.yaml"], { cwd: root });
+    execFileSync("git", ["commit", "-m", "change package identity"], { cwd: root });
+    await expect(validateSourceRepository(root)).rejects.toThrow(/must be the deeplink_x product repository/);
+  });
+
   it("generates deterministic query definitions from a committed product checkout", async () => {
     const root = await productFixture();
     const first = await generateCatalog(root);
