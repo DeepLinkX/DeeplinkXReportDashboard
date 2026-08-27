@@ -1,0 +1,25 @@
+.DS_Store
+*.log
+
+node_modules/
+dist/
+coverage/
+.cache/
+.wrangler/
+
+# Local credentials and operator state
+.dev.vars
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+
+# Generated audit, migration, backup, and diagnostic material
+migration-output/
+exports/
+raw/
+diagnostics/
+*.sql
+*.sqlite
+*.sqlite3
+!migrations/*.sql

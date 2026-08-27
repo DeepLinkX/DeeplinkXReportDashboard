@@ -1,0 +1,86 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "deeplinkx-visibility",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "cache": {
+    "enabled": true,
+    "cross_version_cache": false
+  },
+  "exports": {
+    "default": {
+      "type": "worker",
+      "cache": { "enabled": false }
+    },
+    "PublicAPI": {
+      "type": "worker",
+      "cache": { "enabled": true }
+    }
+  },
+  "workers_dev": true,
+  "preview_urls": true,
+  "triggers": {
+    "crons": ["0 6 * * 1", "0 0 1 * *"]
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "deeplinkx-visibility",
+      "database_id": "ec1078c7-bcf5-405a-aaf6-116a207f0ac5",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "SCAN_QUEUE",
+        "queue": "deeplinkx-visibility-scan"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "deeplinkx-visibility-scan",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 12,
+        "max_concurrency": 1,
+        "dead_letter_queue": "deeplinkx-visibility-dlq"
+      },
+      {
+        "queue": "deeplinkx-visibility-dlq",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://deeplinkx-visibility.parham-dev.workers.dev",
+    "PACKAGE_NAME": "deeplink_x",
+    "CATALOG_URL": "https://raw.githubusercontent.com/DeepLinkX/DeeplinkXReportDashboard/main/catalog/catalog-v3.json",
+    "PULSE_QUERY_LIMIT": "120",
+    "FULL_QUERY_LIMIT": "750",
+    "D1_CAPACITY_BYTES": "524288000",
+    "RAW_RETENTION_DAYS": "90",
+    "DIAGNOSTIC_RETENTION_DAYS": "30"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
+  }
+}

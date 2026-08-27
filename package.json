@@ -1,0 +1,51 @@
+{
+  "name": "@deeplinkx/report-dashboard",
+  "version": "0.1.0",
+  "description": "Permanent pub.dev visibility analytics and Cloudflare dashboard for DeeplinkX.",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://deeplinkx-visibility.parham-dev.workers.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/DeepLinkX/DeeplinkXReportDashboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DeepLinkX/DeeplinkXReportDashboard/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build:dashboard": "vite build",
+    "build": "npm run build:dashboard && wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "typecheck": "tsc -b",
+    "types": "wrangler types src/worker/env.d.ts",
+    "test": "vitest run && npm run test:worker",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "catalog": "tsx scripts/generate-catalog.ts",
+    "migrate:legacy": "tsx scripts/migrate-legacy.ts",
+    "deploy": "npm run build:dashboard && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply deeplinkx-visibility --local",
+    "db:migrate:remote": "wrangler d1 migrations apply deeplinkx-visibility --remote"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "latest",
+    "@cloudflare/workers-types": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vitest": "latest",
+    "wrangler": "latest"
+  }
+}
