@@ -19,7 +19,15 @@ export async function beforePubdevRequest(env: Env): Promise<void> {
   if (spacing) await new Promise((resolve)=>setTimeout(resolve,spacing));
   await save(env,{not_before:0,next_request:Date.now()+2000});
 }
-export async function recordPubdevThrottle(env: Env, retrySeconds: number): Promise<void> {
+export async function recordPubdevThrottle(env: Env, retrySeconds: number, response?: Response): Promise<void> {
+  // Queue delivery delays are bounded to 12 hours, but a longer upstream
+  // deadline must survive successive deferrals without an early request.
+  const raw = response?.headers.get("retry-after");
+  if (raw) {
+    const seconds = Number(raw);
+    const parsed = Number.isFinite(seconds) ? seconds : (Date.parse(raw)-Date.now())/1000;
+    if (Number.isFinite(parsed)) retrySeconds = Math.max(retrySeconds,parsed);
+  }
   const value = await gate(env);
   await save(env,{...value,not_before:Math.max(value.not_before,Date.now()+Math.max(60,retrySeconds)*1000)});
 }

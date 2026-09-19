@@ -39,7 +39,7 @@ async function capturedFetch(env: Env, url: string, purpose: string, attempts: n
   catch { throw new RetryableCompetitorError("Upstream request failed or timed out.", retryDelay(null, attempts), "intelligence-network"); }
   if (response.status === 429 || response.status >= 500) {
     await response.body?.cancel();
-    if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts));
+    if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts),response);
     throw new RetryableCompetitorError(`pub.dev returned HTTP ${response.status}.`, retryDelay(response, attempts), "intelligence-upstream");
   }
   if (!response.ok) { await response.body?.cancel(); throw new PermanentCompetitorError(`pub.dev returned HTTP ${response.status}.`, "intelligence-unavailable"); }

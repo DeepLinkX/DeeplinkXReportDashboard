@@ -18,4 +18,10 @@ describe("shared pub.dev scheduling",()=>{
   expect(JSON.parse(row!.value_json)).toMatchObject({not_before:0});
   expect(JSON.parse(row!.value_json).next_request-Date.now()).toBeGreaterThan(1500);
  });
+ it("preserves an upstream cooldown longer than the Queue delay limit",async()=>{
+  await recordPubdevThrottle(env,43200,new Response(null,{headers:{"retry-after":"86400"}}));
+  await expect(beforePubdevRequest(env)).rejects.toMatchObject({delaySeconds:43200});
+  const row=await env.DB.prepare("SELECT value_json FROM system_state WHERE key='pubdev_request_gate'").first<{value_json:string}>();
+  expect(JSON.parse(row!.value_json).not_before-Date.now()).toBeGreaterThan(86395000);
+ });
 });

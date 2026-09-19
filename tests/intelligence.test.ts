@@ -20,6 +20,8 @@ describe("capability discovery",()=>{
   expect(result.relationship).toBe("direct");expect(result.capability_category).not.toBe("inbound links/routing");
   expect(result.capabilities).toEqual(expect.arrayContaining([expect.objectContaining({action:"chat",deeplinkx_apis:["WhatsApp.chat"]}),expect.objectContaining({action:"buildUrl",migration:"unsupported"})]));
   expect(result.migration_status).toBe("partial");expect(result.expansion).toBe(true);
+  const generic=analyze("outbound_link_builder","Build universal links for external applications.","Handles encoding errors when building URLs.");
+  expect(generic.capability_category).not.toBe("inbound links/routing");expect(generic.actions).toContain("buildUrl");
  });
  it("separates text and file sharing and multiple providers",()=>{
   const result=analyze("social_sharing","Share text, images and files to WhatsApp and Telegram.");

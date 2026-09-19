@@ -89,7 +89,7 @@ async function fetchSearchPage(
     body,
   });
   if (response.status === 429 || response.status >= 500) {
-    if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts));
+    if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts),response);
     throw new RetryableScanError(
       `pub.dev returned HTTP ${response.status} for page ${page}.`,
       retryDelay(response, attempts),

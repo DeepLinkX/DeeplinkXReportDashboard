@@ -1,7 +1,7 @@
 import { semanticText } from "./catalog.js";
 import type { CapabilityMatch, PackageAnalysis, ProductCapability } from "./intelligence.js";
 
-export const ANALYSIS_VERSION = "capabilities-v2.2";
+export const ANALYSIS_VERSION = "capabilities-v2.3";
 
 export interface AnalysisEvidence {
   name: string;
@@ -37,8 +37,7 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
     && !/\b(?:launch\w*|external|installed maps|maps installed)\b/.test(meta);
   const launch = /\b(?:launch(?:es|ing)?|open(?:s|ing)?|redirect(?:s|ing)?)\b/.test(normalized);
   const outbound = /\b(?:share|sharing|send|sending|chat|interact|build|building|create|creating|generate|generating)\b/.test(normalized);
-  const inbound = /\b(?:receiv(?:e|es|ing)|incoming|inbound|handl(?:e|er|es|ing)|routing|router)\b/.test(normalized)
-    && /\b(?:links?|url|uri|schemes?)\b/.test(normalized);
+  const inbound = chunks.some((chunk) => /\b(?:receiv\w*|handl\w*|rout\w*)(?: (?:incoming|inbound|deep|universal|app|custom|url|uri|scheme|and|or)){0,6} (?:links?|urls?|uris?|schemes?)\b|\b(?:incoming|inbound) (?:deep |universal |app )?(?:links?|urls?)\b|\b(?:links?|urls?|uris?|schemes?) (?:handler|receiver|router)\b/.test(semanticText(chunk)));
 
   function add(provider: string, action: string, expression: RegExp, apiAction?: string, extra: string[] = [], requires?: RegExp) {
     const qualifies = (chunk: string) => expression.test(semanticText(chunk)) && (!requires || requires.test(semanticText(chunk)));
@@ -89,6 +88,9 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
     // Builders can compete for an outbound action without launching it directly.
     if (!genericShare && providers.length && /\b(?:build\w*|creat\w*|generat\w*|interact)\b/.test(normalized) && /\b(?:http links|links|uri|url)\b/.test(normalized)) {
       for (const provider of providers) add(provider, "buildUrl", /\b(?:build\w*|creat\w*|generat\w*|interact)\b/, "buildUrl", ["Pure-Dart/URI-only use and input normalization need separate assessment; DeeplinkX is a Flutter package."], /\b(?:links?|uri|url)\b/);
+    }
+    if (!providers.length && !inbound) {
+      add("General", "buildUrl", /\b(?:build\w*|creat\w*|generat\w*)\b.{0,60}\b(?:deep|universal|app) links?\b|\b(?:deep|universal|app) links? build\w*\b/, "buildUrl", ["Generic outbound link construction requires review against specific app URLs and runtime requirements."]);
     }
   }
   const unique = [...new Map(matches.map((match) => [`${match.provider}:${match.action}`, match])).values()];
