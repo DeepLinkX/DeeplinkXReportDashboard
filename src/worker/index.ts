@@ -7,10 +7,10 @@ import {
   purgePublicCacheTags,
   runCacheTag,
 } from "./cache.js";
-import { syncCatalog } from "./catalog-store.js";
+import { executeStartup, failStartup, startupMessage } from "./startup.js";
 import { finalizeRun } from "./reports.js";
 import { recordDiagnostic } from "./retention.js";
-import { createRun, markDeadLetter } from "./run-service.js";
+import { markDeadLetter } from "./run-service.js";
 import { RetryableScanError, recordRetry, scanQuery, retryDelay } from "./scanner.js";
 import { startIntelligence, processIntelligenceJob, failIntelligenceJob } from "./intelligence.js";
 import { PubdevDeferredError } from "./pubdev.js";
@@ -69,6 +69,19 @@ async function handleQueueMessage(
   env: Env,
   context: ExecutionContext,
 ): Promise<void> {
+  if (message.body.kind === "start-operation") {
+    try {
+      await executeStartup(env,message.body);
+      await invalidatePublicCache(context,env,[MUTABLE_CACHE_TAG]);
+      message.ack();
+    } catch (error) {
+      if (isD1DailyQuotaError(error)) throw error;
+      if (await deferPubdev(message,env,error)) return;
+      if (error instanceof PermanentCompetitorError) { await failStartup(env,message.body,error); message.ack(); }
+      else message.retry({delaySeconds:error instanceof RetryableScanError ? error.delaySeconds : retryDelay(null,message.attempts)});
+    }
+    return;
+  }
   if (message.body.kind === "intelligence") {
     try {
       await processIntelligenceJob(env, message.body.jobId, message.attempts);
@@ -198,17 +211,9 @@ export default {
   },
 
   async scheduled(event, env, context): Promise<void> {
-    await syncCatalog(env);
     const profile = event.cron === "0 0 1 * *" ? "full" : "pulse";
     const date = new Date(event.scheduledTime);
-    const dateKey = date.toISOString().slice(0, 10);
-    const run = await createRun(env, {
-      profile,
-      date,
-      triggerSource: "cron",
-      idempotencyKey: `cron:${profile}:${dateKey}`,
-    });
-    await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG, runCacheTag(run.id)], run.id);
+    await env.SCAN_QUEUE.send(await startupMessage({type:"run",profile,triggerSource:"cron"},`cron:${profile}:${date.toISOString().slice(0,10)}`,date));
   },
 
   async queue(batch, env, context): Promise<void> {
@@ -217,6 +222,11 @@ export default {
         if (batch.queue === "deeplinkx-visibility-dlq") {
           try {
             const detail = `Exhausted Queue retries after ${message.attempts} attempts.`;
+            if (message.body.kind === "start-operation") {
+              await failStartup(env,message.body,new Error(detail));
+              message.ack();
+              continue;
+            }
             if (message.body.kind === "intelligence") {
               await failIntelligenceJob(env, message.body.jobId, detail, true);
               await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);

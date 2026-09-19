@@ -1,3 +1,4 @@
+import { OperationStatus } from "./OperationStatus.js";
 import { CompetitorDirectory } from "./CompetitorDirectory.js";
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Route, Routes, useParams, useSearchParams } from "react-router-dom";
@@ -352,5 +353,5 @@ function LegacyArchive() {
 }
 
 export function App() {
-  return <Shell><Routes><Route path="/" element={<Overview />} /><Route path="/history" element={<History />} /><Route path="/queries" element={<QueryExplorer />} /><Route path="/matrices" element={<Matrices />} /><Route path="/competitors" element={<Competitors />} /><Route path="/reports" element={<Reports />} /><Route path="/reports/:runId" element={<ReportDetail />} /><Route path="/legacy" element={<LegacyArchive />} /><Route path="*" element={<section className="page-section"><Empty title="Page not found"><Link to="/">Return to the overview.</Link></Empty></section>} /></Routes></Shell>;
+  return <Shell><Routes><Route path="/" element={<Overview />} /><Route path="/history" element={<History />} /><Route path="/queries" element={<QueryExplorer />} /><Route path="/matrices" element={<Matrices />} /><Route path="/competitors" element={<Competitors />} /><Route path="/reports" element={<Reports />} /><Route path="/reports/:runId" element={<ReportDetail />} /><Route path="/legacy" element={<LegacyArchive />} /><Route path="/operations/:operationId" element={<OperationStatus />} /><Route path="*" element={<section className="page-section"><Empty title="Page not found"><Link to="/">Return to the overview.</Link></Empty></section>} /></Routes></Shell>;
 }

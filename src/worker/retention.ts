@@ -84,6 +84,7 @@ async function capacityRatio(env: Env): Promise<number> {
   // conservative estimate includes stored text plus fixed row/index overhead;
   // operator backups provide the authoritative external size check.
   const statements = [
+    "SELECT COALESCE(SUM(LENGTH(value_json)+128),0) AS bytes FROM system_state",
     "SELECT COALESCE(SUM(LENGTH(content_json) + 512), 0) AS bytes FROM catalogs",
     "SELECT COALESCE(SUM(LENGTH(query) + LENGTH(tags_json) + LENGTH(sources_json) + 512), 0) AS bytes FROM queries",
     "SELECT COUNT(*) * 1024 AS bytes FROM runs",

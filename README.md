@@ -270,6 +270,16 @@ When D1 reports a daily read/write quota error, the consumer reschedules the ori
 
 Inspect Worker logs for `d1-daily-quota-deferred`, verify that the original run resumes after reset, and let its enrichment finish before assessing completeness. Never delete history or invent a new run date to bypass quota or daily report conflicts. A paid-plan change requires separate billing authorization; deployment does not authorize it.
 
+### Automatic startup recovery
+
+Weekly and monthly cron events first enqueue a `start-operation` intent containing the original scheduled time, profile and idempotency key, before catalog synchronization or any D1 access. The same queue then initializes the report. Manual report, competitor refresh and backfill requests retain their normal successful response fields; if D1 quota or a temporary upstream/dispatch delay interrupts startup, they return `202` only after the original intent is accepted by Queue. The additive deferred response contains `operation_id`, `status: "deferred"`, `resume_after`, `status_url`, and `dashboard_url`. Queue rejection returns a retryable `503`; retry with the same idempotency key. Authentication and scope validation happen before accepting manual work.
+
+`GET /api/v1/operations/:operation_id` and `/operations/:operation_id` show a sanitized startup status without exposing request keys, payloads or internal errors. Status responses use `Cache-Control: no-store` and bypass Workers Caching. If quota prevented the first D1 write, the operation endpoint honestly returns `404` until its first database checkpoint exists; a missing status record alone does not establish absence from Queue. Keep the accepted response and operation ID. The dashboard does not poll continuously. `started` means initialization finished, not that the report or competitor enrichment is complete; follow the report link for progress.
+
+Startup records and report-initialization cursors use namespaced `startup:` and `run-init:` entries in the existing `system_state` table. They are retained for idempotency and recovery, included in storage estimates, and require no schema migration. Initialization fills only missing query rows, reuses the run's selected catalog and successful package-snapshot resources, and checkpoints each dispatch batch. Replayed deliveries skip completed evidence. Original requested dates and existing profile/date conflict rules remain authoritative across resets; catalog selection is recorded when creation actually becomes possible. A startup that exhausts non-quota retries is recorded as failed for maintainer review.
+
+No additional schedule, recurring LLM call, paid-plan change, or assistant automation is required for future queued report processing to resume. This is recovery for resettable D1 quotas and temporary upstream delays; capacity limits and permanent errors still need intervention. A Cloudflare Queue outage that prevents initial acceptance is reported explicitly rather than promising automatic recovery.
+
 ### Dead-letter and incomplete-run recovery
 
 1. Inspect Worker logs and the private `diagnostic_events` rows without copying credentials or raw responses into an issue.

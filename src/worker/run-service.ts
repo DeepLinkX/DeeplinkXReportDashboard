@@ -1,7 +1,10 @@
-import { PROFILE_DEPTH, sha256Hex, stableJson } from "../shared/catalog.js";
+import { PROFILE_DEPTH, sha256Hex, stableJson, validateCatalog } from "../shared/catalog.js";
 import type { AuditProfile, AuditQueueMessage, CatalogManifest, QueryDefinition } from "../shared/types.js";
 import { activeCatalog, selectCatalogQueries } from "./catalog-store.js";
 import { enforceRetention, recordDiagnostic, storeRawBody } from "./retention.js";
+import { isD1DailyQuotaError } from "./quota.js";
+import { beforePubdevRequest, recordPubdevThrottle, PubdevDeferredError } from "./pubdev.js";
+import { RetryableScanError, retryDelay } from "./scanner.js";
 
 const STATEMENT_CHUNK = 75;
 const QUEUE_CHUNK = 100;
@@ -65,6 +68,9 @@ async function fetchCaptured(
   purpose: string,
   url: string,
 ): Promise<{ response: Response; body: string }> {
+  const saved = await env.DB.prepare("SELECT body,status_code FROM raw_http_bodies WHERE run_id=? AND purpose=? AND status_code BETWEEN 200 AND 299 ORDER BY captured_at DESC LIMIT 1").bind(runId,purpose).first<{body:string;status_code:number}>();
+  if (saved) return {response:new Response(saved.body,{status:saved.status_code}),body:saved.body};
+  await beforePubdevRequest(env);
   const response = await fetch(url, {
     headers: { accept: purpose.includes("page") ? "text/html" : "application/json", "user-agent": "deeplinkx-visibility/1.0" },
   });
@@ -73,6 +79,11 @@ async function fetchCaptured(
   const body = await response.text();
   if (body.length > 1_000_000) throw new Error(`${purpose} exceeded the 1 MB response limit.`);
   await storeRawBody(env, { runId, purpose, sourceUrl: url, response, body });
+  if (response.status === 429 || response.status >= 500) {
+    const delay = retryDelay(response,1);
+    if (response.status === 429) await recordPubdevThrottle(env,delay,response);
+    throw new RetryableScanError(`${purpose} returned HTTP ${response.status}.`,delay,"package-snapshot-upstream");
+  }
   if (!response.ok) throw new Error(`${purpose} returned HTTP ${response.status}.`);
   return { response, body };
 }
@@ -82,12 +93,10 @@ async function capturePackageSnapshot(env: Env, runId: string, catalog: CatalogM
   const scoreUrl = `${packageUrl}/score`;
   const packagePageUrl = `https://pub.dev/packages/${encodeURIComponent(env.PACKAGE_NAME)}`;
   const scorePageUrl = `${packagePageUrl}/score`;
-  const [packageApiResult, scoreApiResult] = await Promise.all([
-    fetchCaptured(env, runId, "package-metadata", packageUrl),
-    fetchCaptured(env, runId, "score-metadata", scoreUrl),
-    fetchCaptured(env, runId, "package-page", packagePageUrl),
-    fetchCaptured(env, runId, "score-page", scorePageUrl),
-  ]);
+  const packageApiResult = await fetchCaptured(env, runId, "package-metadata", packageUrl);
+  const scoreApiResult = await fetchCaptured(env, runId, "score-metadata", scoreUrl);
+  await fetchCaptured(env, runId, "package-page", packagePageUrl);
+  await fetchCaptured(env, runId, "score-page", scorePageUrl);
   const packageApi = JSON.parse(packageApiResult.body) as PackageApi;
   const scoreApi = JSON.parse(scoreApiResult.body) as ScoreApi;
   const latest = packageApi.latest ?? {};
@@ -164,7 +173,18 @@ export async function createRun(
   },
 ): Promise<RunRow> {
   const duplicate = await existingRun(env, input.idempotencyKey);
-  if (duplicate) return duplicate;
+  if (duplicate) {
+    if (duplicate.profile !== input.profile) throw new Error("Idempotency key belongs to another report profile.");
+    if (duplicate.status === "complete" || duplicate.status === "skipped") return duplicate;
+    const state = await env.DB.prepare("SELECT value_json FROM system_state WHERE key=?").bind(`run-init:${duplicate.id}`).first<{value_json:string}>();
+    if (duplicate.status === "creating" || (state && JSON.parse(state.value_json).phase !== "complete")) {
+      const saved = await env.DB.prepare("SELECT content_json FROM catalogs WHERE catalog_version=?").bind(duplicate.catalog_version).first<{content_json:string}>();
+      if (!saved) throw new Error("The run's original catalog is unavailable.");
+      await initializeRun(env,duplicate,await validateCatalog(JSON.parse(saved.content_json)));
+      return (await existingRun(env,input.idempotencyKey))!;
+    }
+    return duplicate;
+  }
   const catalog = await activeCatalog(env);
   const reportDate = utcDate(input.date);
   const active = await env.DB.prepare(
@@ -220,12 +240,32 @@ export async function createRun(
     ).run();
   } catch (error) {
     const raced = await existingRun(env, input.idempotencyKey);
-    if (raced) return raced;
+    if (raced) return createRun(env,input);
     throw error;
   }
 
+  await initializeRun(env,(await existingRun(env,input.idempotencyKey))!,catalog);
+  return (await existingRun(env,input.idempotencyKey))!;
+}
+
+async function initializeRun(env: Env, run: RunRow, catalog: CatalogManifest): Promise<void> {
+  const runId = run.id;
+  const selected = selectCatalogQueries(catalog,run.profile);
+  const depth = run.requested_depth;
+  const now = new Date().toISOString();
+  const stateKey = `run-init:${runId}`;
+  const stored = await env.DB.prepare("SELECT value_json FROM system_state WHERE key=?").bind(stateKey).first<{value_json:string}>();
+  let state = stored ? JSON.parse(stored.value_json) as {phase:string;nextOffset:number} : {phase:"initializing",nextOffset:0};
+  if (state.phase === "complete") return;
+  const checkpoint = async (phase:string,nextOffset:number) => {
+    await env.DB.prepare("INSERT INTO system_state(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at")
+      .bind(stateKey,JSON.stringify({phase,nextOffset}),new Date().toISOString()).run();
+    state = {phase,nextOffset};
+  };
+  // Save initialization intent before any query can advance the run to running.
+  await checkpoint(state.phase,state.nextOffset);
   const queryStatements = await Promise.all(selected.map(async (query) => env.DB.prepare(
-    `INSERT INTO run_queries (
+    `INSERT OR IGNORE INTO run_queries (
       run_id, query_id, query, lane, product_area, expression_type, product_fit,
       tags_json, sources_json, definition_hash, requested_depth, status, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
@@ -245,33 +285,29 @@ export async function createRun(
   )));
   for (const group of groups(queryStatements, STATEMENT_CHUNK)) await env.DB.batch(group);
 
-  try {
-    await capturePackageSnapshot(env, runId, catalog);
-  } catch (error) {
-    await recordDiagnostic(env, {
-      runId,
-      severity: "warning",
-      code: "package-snapshot-failed",
-      detail: error instanceof Error ? error.message : String(error),
-    });
+  if (!await env.DB.prepare("SELECT id FROM package_snapshots WHERE run_id=? LIMIT 1").bind(runId).first()) {
+    try { await capturePackageSnapshot(env,runId,catalog); }
+    catch (error) {
+      if (isD1DailyQuotaError(error) || error instanceof PubdevDeferredError || error instanceof RetryableScanError) throw error;
+      await recordDiagnostic(env,{runId,severity:"warning",code:"package-snapshot-failed",detail:error instanceof Error?error.message:String(error)});
+    }
   }
-
-  const messages = selected.map((query) => ({ body: { kind: "scan-query", runId, queryId: query.query_id } satisfies AuditQueueMessage }));
-  try {
-    for (const group of groups(messages, QUEUE_CHUNK)) await env.SCAN_QUEUE.sendBatch(group);
-    await env.DB.batch([
-      env.DB.prepare("UPDATE run_queries SET status = 'queued', updated_at = ? WHERE run_id = ? AND status = 'planned'").bind(now, runId),
-      env.DB.prepare("UPDATE runs SET status = 'queued', started_at = ?, updated_at = ? WHERE id = ?").bind(now, now, runId),
-    ]);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    await env.DB.prepare(
-      "UPDATE runs SET status = 'incomplete', error_summary = ?, completed_at = ?, updated_at = ? WHERE id = ?",
-    ).bind(`Queue creation failed: ${detail}`, now, now, runId).run();
-    await recordDiagnostic(env, { runId, severity: "error", code: "queue-creation-failed", detail });
-    throw error;
+  for (let offset = state.nextOffset; offset < selected.length; offset += QUEUE_CHUNK) {
+    const ids = selected.slice(offset,offset+QUEUE_CHUNK).map((query)=>query.query_id);
+    const rows = await env.DB.prepare("SELECT query_id FROM run_queries WHERE run_id=? AND status IN ('planned','queued','running') AND query_id IN (SELECT value FROM json_each(?))")
+      .bind(runId,JSON.stringify(ids)).all<{query_id:string}>();
+    if (rows.results.length) {
+      try { await env.SCAN_QUEUE.sendBatch(rows.results.map((row)=>({body:{kind:"scan-query",runId,queryId:row.query_id} satisfies AuditQueueMessage}))); }
+      catch { throw new RetryableScanError("Query dispatch could not finish; retrying its saved cursor.",60,"startup-dispatch-retry"); }
+    }
+    // Send before checkpoint: a crash can duplicate delivery, never omit a query.
+    await checkpoint("dispatching",offset+QUEUE_CHUNK);
   }
-  return (await existingRun(env, input.idempotencyKey))!;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE run_queries SET status='queued',updated_at=? WHERE run_id=? AND status='planned'").bind(now,runId),
+    env.DB.prepare("UPDATE runs SET status=CASE WHEN status='creating' THEN 'queued' ELSE status END,started_at=COALESCE(started_at,?),updated_at=? WHERE id=?").bind(now,now,runId),
+  ]);
+  await checkpoint("complete",selected.length);
 }
 
 export async function updateRunProgress(env: Env, runId: string): Promise<void> {
@@ -304,7 +340,7 @@ export async function enqueueFinalizerIfReady(env: Env, runId: string): Promise<
   }
 }
 
-export async function markDeadLetter(env: Env, message: Exclude<AuditQueueMessage, {kind:"intelligence"}>, detail: string): Promise<void> {
+export async function markDeadLetter(env: Env, message: Exclude<AuditQueueMessage, {kind:"intelligence"}|{kind:"start-operation"}>, detail: string): Promise<void> {
   const now = new Date().toISOString();
   if (message.kind === "scan-query") {
     await env.DB.prepare(

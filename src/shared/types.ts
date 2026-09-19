@@ -86,7 +86,18 @@ export interface IntelligenceMessage {
   kind: "intelligence";
   jobId: string;
 }
-export type AuditQueueMessage = ScanQueryMessage | FinalizeRunMessage | EnrichCompetitorMessage | IntelligenceMessage | { kind: "classify-competitors"; runId: string };
+export type StartupRequest =
+  | { type: "run"; profile: "pulse" | "full"; triggerSource: "cron" | "manual" }
+  | { type: "refresh"; runId?: string; full: boolean }
+  | { type: "backfill"; runId?: string };
+export interface StartupMessage {
+  kind: "start-operation";
+  operationId: string;
+  idempotencyKey: string;
+  requestedAt: string;
+  request: StartupRequest;
+}
+export type AuditQueueMessage = ScanQueryMessage | FinalizeRunMessage | EnrichCompetitorMessage | IntelligenceMessage | StartupMessage | { kind: "classify-competitors"; runId: string };
 
 export interface SearchPackage {
   package: string;

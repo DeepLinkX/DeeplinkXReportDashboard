@@ -23,6 +23,7 @@ describe("D1 daily quota recovery", () => {
   });
 
   it.each<AuditQueueMessage>([
+    {kind:"start-operation",operationId:"a".repeat(64),idempotencyKey:"scheduled",requestedAt:"2026-09-19T00:00:00Z",request:{type:"run",profile:"full",triggerSource:"cron"}},
     { kind: "scan-query", runId: "original-run", queryId: "original-query" },
     { kind: "finalize-run", runId: "original-run" },
     { kind: "classify-competitors", runId: "original-run" },

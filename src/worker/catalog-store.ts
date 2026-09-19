@@ -1,3 +1,4 @@
+import { isD1DailyQuotaError } from "./quota.js";
 import bundledCatalog from "../../catalog/catalog-v3.json";
 import { sha256Hex, stableJson, validateCatalog } from "../shared/catalog.js";
 import type { AuditProfile, CatalogManifest, QueryDefinition } from "../shared/types.js";
@@ -125,6 +126,7 @@ export async function syncCatalog(env: Env): Promise<{ catalog: CatalogManifest;
     const catalog = await storeCatalog(env, JSON.parse(text), true);
     return { catalog, warning: null };
   } catch (error) {
+    if (isD1DailyQuotaError(error)) throw error;
     const catalog = await activeCatalog(env);
     const warning = error instanceof Error ? error.message : String(error);
     await env.DB.prepare(

@@ -1,18 +1,18 @@
+import { admitStartup, startupMessage, startupStatus, StartupQueueUnavailable } from "./startup.js";
 import type { AuditProfile } from "../shared/types.js";
 import { isD1DailyQuotaError, quotaResetDelay } from "./quota.js";
-import { directoryResponse, packageResponse, startIntelligence, exportReview, importReview } from "./intelligence.js";
+import { directoryResponse, packageResponse, exportReview, importReview } from "./intelligence.js";
 import { canonicalizePackageSnapshots, compareQuerySets, type MovementQuery } from "../shared/movement.js";
 import { activateBundledCatalog, syncCatalog } from "./catalog-store.js";
 import type { LegacyImportPayload } from "../shared/types.js";
 import { HistoryInputError, historyEvents, historySummary, validUtcDate } from "./history.js";
 import { importLegacyDocument } from "./legacy-import.js";
 import { enforceRetention, retentionState } from "./retention.js";
-import { createRun, resumeFinalizers } from "./run-service.js";
+import { resumeFinalizers } from "./run-service.js";
 import {
   PermanentCompetitorError,
   competitorClassificationSummary,
   reportedCompetitors,
-  startCompetitorBackfill,
 } from "./competitors.js";
 import {
   MUTABLE_CACHE_TAG,
@@ -394,10 +394,10 @@ async function admin(
   if (!idempotencyKey || idempotencyKey.length > 200) return errorResponse(400, "A bounded Idempotency-Key header is required.");
   if (path === "/api/v1/admin/competitors/refresh" && request.method === "POST") {
     const body = await bodyJson<{run_id?:string; full?:boolean}>(request);
-    if (body.run_id && !await env.DB.prepare("SELECT id FROM runs WHERE id=?").bind(body.run_id).first()) return errorResponse(400,"Unknown run.");
-    const result = await startIntelligence(env, `manual:${idempotencyKey}`, body.run_id, body.full ?? true);
+    if ((body.run_id !== undefined && (typeof body.run_id !== "string" || !body.run_id.trim() || body.run_id.length > 200)) || (body.full !== undefined && typeof body.full !== "boolean")) return errorResponse(400,"Invalid refresh scope.");
+    const result = await admitStartup(env,await startupMessage({type:"refresh",runId:body.run_id?.trim(),full:body.full??true},idempotencyKey));
     await invalidate([MUTABLE_CACHE_TAG]);
-    return json(result,{status:202,headers:{"cache-control":"no-store"}});
+    return json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
   }
   if (path === "/api/v1/admin/competitors/review/export" && request.method === "POST") {
     try {
@@ -416,9 +416,9 @@ async function admin(
   if (path === "/api/v1/admin/runs" && request.method === "POST") {
     const body = await bodyJson<{ profile?: AuditProfile }>(request);
     if (body.profile !== "pulse" && body.profile !== "full") return errorResponse(400, "Profile must be pulse or full.");
-    const run = await createRun(env, { profile: body.profile, idempotencyKey, triggerSource: "manual" });
-    await invalidate([MUTABLE_CACHE_TAG, runCacheTag(run.id)], run.id);
-    return json({ run }, { status: run.status === "skipped" ? 200 : 202, headers: { "cache-control": "no-store" } });
+    const result = await admitStartup(env,await startupMessage({type:"run",profile:body.profile,triggerSource:"manual"},idempotencyKey));
+    await invalidate([MUTABLE_CACHE_TAG]);
+    return json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
   }
   if (path === "/api/v1/admin/catalog/sync" && request.method === "POST") {
     const body = await bodyJson<{ source?: "remote" | "bundled" }>(request);
@@ -446,15 +446,12 @@ async function admin(
   }
   if (path === "/api/v1/admin/competitors/backfill" && request.method === "POST") {
     const body = await bodyJson<{ run_id?: string }>(request);
-    if (body.run_id !== undefined && (!body.run_id.trim() || body.run_id.length > 200)) {
+    if (body.run_id !== undefined && (typeof body.run_id !== "string" || !body.run_id.trim() || body.run_id.length > 200)) {
       return errorResponse(400, "run_id must be a bounded non-empty string when provided.");
     }
-    const result = await startCompetitorBackfill(env, idempotencyKey, body.run_id?.trim());
-    await Promise.all(result.started_runs.map((runId) => invalidate([MUTABLE_CACHE_TAG, runCacheTag(runId)], runId)));
-    return json(result, {
-      status: result.already_started ? 200 : 202,
-      headers: { "cache-control": "no-store" },
-    });
+    const result = await admitStartup(env,await startupMessage({type:"backfill",runId:body.run_id?.trim()},idempotencyKey));
+    await invalidate([MUTABLE_CACHE_TAG]);
+    return json(result.body,{status:result.status,headers:{"cache-control":"no-store"}});
   }
   return errorResponse(404, "Admin endpoint not found.");
 }
@@ -526,6 +523,11 @@ export async function handleUncachedApi(
   try {
     if (path.startsWith("/api/v1/admin/")) return await admin(request, env, path, invalidate);
     if (request.method !== "GET") return errorResponse(405, "Method not allowed.");
+    const operationMatch = path.match(/^\/api\/v1\/operations\/([a-f0-9]{64})$/);
+    if (operationMatch) {
+      const operation = await startupStatus(env,operationMatch[1]);
+      return operation ? json(operation,{headers:{"cache-control":"no-store"}}) : errorResponse(404,"No database record yet. A queued request may not appear until database access returns; otherwise check the operation ID.");
+    }
     if (path === "/api/v1/health") {
       const active = await env.DB.prepare("SELECT catalog_version FROM catalogs WHERE is_active = 1").first();
       return json(
@@ -536,8 +538,9 @@ export async function handleUncachedApi(
     return errorResponse(404, "API endpoint not found.");
   } catch (error) {
     if (isD1DailyQuotaError(error)) return quotaUnavailable();
+    if (error instanceof StartupQueueUnavailable) return json({error:error.message},{status:503,headers:{"cache-control":"no-store","retry-after":"60"}});
     if (error instanceof PermanentCompetitorError) {
-      return errorResponse(error.code === "backfill-idempotency-conflict" ? 409 : 400, error.message);
+      return errorResponse(error.code.endsWith("idempotency-conflict") ? 409 : 400, error.message);
     }
     return errorResponse(500, error instanceof Error ? error.message : "Unexpected service error.");
   }
