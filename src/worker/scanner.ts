@@ -1,6 +1,7 @@
 import type { RunQueryRecord, SearchPayload } from "../shared/types.js";
 import { enqueueFinalizerIfReady } from "./run-service.js";
 import { recordDiagnostic, storeRawBody } from "./retention.js";
+import { beforePubdevRequest, recordPubdevThrottle } from "./pubdev.js";
 
 const PAGE_SIZE = 10;
 const POSITION_BATCH = 75;
@@ -63,6 +64,7 @@ async function fetchSearchPage(
   const url = new URL("https://pub.dev/api/search");
   url.searchParams.set("q", row.query);
   url.searchParams.set("page", String(page));
+  await beforePubdevRequest(env);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -87,6 +89,7 @@ async function fetchSearchPage(
     body,
   });
   if (response.status === 429 || response.status >= 500) {
+    if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts));
     throw new RetryableScanError(
       `pub.dev returned HTTP ${response.status} for page ${page}.`,
       retryDelay(response, attempts),

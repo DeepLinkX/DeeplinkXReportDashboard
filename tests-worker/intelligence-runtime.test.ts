@@ -2,6 +2,12 @@ import { applyD1Migrations,env,SELF } from "cloudflare:test";
 import {beforeAll,afterEach,describe,it,expect,vi} from "vitest";
 import { refreshPackage,registerPackage,importReview,processIntelligenceJob,startIntelligence } from "../src/worker/intelligence.js";
 import {RetryableCompetitorError} from "../src/worker/competitors.js";
+// Resource checkpoint tests isolate the shared scheduler; pubdev-runtime tests
+// exercise its real D1 cooldown separately.
+vi.mock("../src/worker/pubdev.js",async(importOriginal)=>({
+ ...await importOriginal<typeof import("../src/worker/pubdev.js")>(),
+ beforePubdevRequest:vi.fn(),recordPubdevThrottle:vi.fn(),
+}));
 beforeAll(async()=>{await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);});
 afterEach(()=>vi.restoreAllMocks());
 const metadata=(name:string)=>({name,latest:{version:"1.0.0",published:"2022-01-01T00:00:00Z",pubspec:{description:"Share WhatsApp text and links",topics:["whatsapp"]}}});

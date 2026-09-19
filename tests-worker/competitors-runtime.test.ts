@@ -7,7 +7,9 @@ import {
   recordCompetitorRetry,
   startCompetitorBackfill,
   dispatchCompetitorClassifications,
+  updatePackageComparisons,
 } from "../src/worker/competitors.js";
+import type { IntelligencePackage } from "../src/shared/intelligence.js";
 
 const catalogVersion = "competitor-test-catalog";
 
@@ -197,5 +199,13 @@ describe("competitor classification runtime", () => {
       pending_count: 0,
       relationship_counts: { direct: 1, adjacent: 0, noise: 0, unknown: 1 },
     });
+  });
+  it("updates derived comparisons from changed evidence without changing raw history or exports", async () => {
+    await env.DB.prepare("INSERT INTO report_artifacts(id,run_id,artifact_type,filename,content_type,content,content_hash,created_at) VALUES('review-artifact','classified-run','json','review-fixture.json','application/json','original report','original-hash','2026-09-02')").run();
+    const raw=await env.DB.prepare("SELECT * FROM competitors WHERE run_id='classified-run'").all();
+    await updatePackageComparisons(env, {package_name:"map_launcher",published_version:"6.0.0",description:"Reviewed evidence",topics:[],metadata_captured_at:"2026-09-19T00:00:00Z",relationship:"noise",capability_category:"other",rationale:"Reviewed correction",actions:[],capabilities:[]} as unknown as IntelligencePackage);
+    expect(await env.DB.prepare("SELECT relationship,relevant_occurrence_count,metadata_captured_at FROM competitor_classifications WHERE run_id='classified-run' AND package_name='map_launcher'").first()).toMatchObject({relationship:"noise",relevant_occurrence_count:0,metadata_captured_at:"2026-09-19T00:00:00Z"});
+    expect((await env.DB.prepare("SELECT * FROM competitors WHERE run_id='classified-run'").all()).results).toEqual(raw.results);
+    expect(await env.DB.prepare("SELECT content,content_hash FROM report_artifacts WHERE id='review-artifact'").first()).toEqual({content:"original report",content_hash:"original-hash"});
   });
 });

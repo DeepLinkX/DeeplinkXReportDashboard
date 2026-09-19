@@ -5,7 +5,8 @@ import { normalize, sha256Hex, stableJson } from "../shared/catalog.js";
 import { DIRECTORY_FILTERS, DIRECTORY_SORTS, type IntelligencePackage, type PackageAnalysis, type ProductCapability } from "../shared/intelligence.js";
 import { recordDiagnostic, storeRawBody, enforceRetention } from "./retention.js";
 import { retryDelay } from "./scanner.js";
-import { RetryableCompetitorError, PermanentCompetitorError } from "./competitors.js";
+import { beforePubdevRequest, recordPubdevThrottle, PubdevDeferredError } from "./pubdev.js";
+import { RetryableCompetitorError, PermanentCompetitorError, updatePackageComparisons } from "./competitors.js";
 
 const DAY = 86_400_000;
 const catalog = bundledCatalog as unknown as { source_commit: string; capabilities: ProductCapability[] };
@@ -32,11 +33,13 @@ export async function registerPackage(env: Env, name: string, seenAt?: string): 
 }
 
 async function capturedFetch(env: Env, url: string, purpose: string, attempts: number, runId?: string): Promise<string> {
+  await beforePubdevRequest(env);
   let response: Response;
   try { response = await fetch(url, { headers: { accept: purpose.includes("readme") ? "text/html" : "application/json", "user-agent": "deeplinkx-visibility/2.0" }, signal: AbortSignal.timeout(25_000) }); }
   catch { throw new RetryableCompetitorError("Upstream request failed or timed out.", retryDelay(null, attempts), "intelligence-network"); }
   if (response.status === 429 || response.status >= 500) {
     await response.body?.cancel();
+    if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts));
     throw new RetryableCompetitorError(`pub.dev returned HTTP ${response.status}.`, retryDelay(response, attempts), "intelligence-upstream");
   }
   if (!response.ok) { await response.body?.cancel(); throw new PermanentCompetitorError(`pub.dev returned HTTP ${response.status}.`, "intelligence-unavailable"); }
@@ -54,6 +57,7 @@ async function capturedFetch(env: Env, url: string, purpose: string, attempts: n
 }
 
 async function stageError(env: Env, name: string, stage: "metadata" | "metrics" | "documentation", error: unknown): Promise<void> {
+  if (error instanceof PubdevDeferredError) throw error;
   await env.DB.prepare(`UPDATE competitor_registry SET ${stage}_error=?,refresh_status='partial',updated_at=? WHERE package_name=?`)
     .bind(error instanceof Error ? error.message.slice(0, 300) : "Upstream failure", now(), name).run();
   if (error instanceof RetryableCompetitorError) throw error;
@@ -119,7 +123,9 @@ export async function refreshPackage(env: Env, name: string, attempts = 1, runId
   await env.DB.prepare(`UPDATE competitor_registry SET analysis_json=?,relationship=?,evidence_hash=?,product_commit=?,classifier_version=?,
     refresh_status=CASE WHEN metadata_error IS NOT NULL OR metrics_error IS NOT NULL OR documentation_error IS NOT NULL THEN 'partial' ELSE 'complete' END,updated_at=? WHERE package_name=?`)
     .bind(JSON.stringify(analysis), analysis.relationship, hash, catalog.source_commit, ANALYSIS_VERSION, now(), name).run();
-  return directoryPackage((await env.DB.prepare("SELECT * FROM competitor_registry WHERE package_name=?").bind(name).first<RegistryRow>())!);
+  const enriched = directoryPackage((await env.DB.prepare("SELECT * FROM competitor_registry WHERE package_name=?").bind(name).first<RegistryRow>())!);
+  if (row.evidence_hash !== hash || row.product_commit !== catalog.source_commit) await updatePackageComparisons(env, enriched);
+  return enriched;
 }
 
 function directoryPackage(row: RegistryRow): IntelligencePackage {
@@ -344,4 +350,5 @@ export async function importReview(env: Env, body: {package_name:string;evidence
       .bind(body.package_name,body.evidence_hash,body.product_commit,JSON.stringify(analysis),body.reviewed_by,stamp),
     env.DB.prepare("UPDATE competitor_registry SET analysis_json=?,relationship=?,updated_at=? WHERE package_name=?").bind(JSON.stringify(analysis),decision.relationship,stamp,body.package_name),
   ]);
+  await updatePackageComparisons(env, directoryPackage((await env.DB.prepare("SELECT * FROM competitor_registry WHERE package_name=?").bind(body.package_name).first<RegistryRow>())!));
 }

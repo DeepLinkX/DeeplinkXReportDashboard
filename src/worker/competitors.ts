@@ -2,7 +2,7 @@ import bundledCatalog from "../../catalog/catalog-v3.json";
 import { analyzePackage, ANALYSIS_VERSION } from "../shared/competitor-analysis.js";
 import type { ProductCapability } from "../shared/intelligence.js";
 import { refreshPackage } from "./intelligence.js";
-import type { CapabilityMatch } from "../shared/intelligence.js";
+import type { CapabilityMatch, IntelligencePackage } from "../shared/intelligence.js";
 import { semanticText } from "../shared/catalog.js";
 import type { CompetitorRelationship } from "../shared/types.js";
 import { retryDelay } from "./scanner.js";
@@ -421,6 +421,11 @@ export async function enrichCompetitor(
   ).bind(now, runId, packageName).run();
 
   const enriched = await refreshPackage(env, packageName, attempts, runId);
+  await persistPackageClassification(env, runId, enriched);
+}
+
+async function persistPackageClassification(env: Env, runId: string, enriched: IntelligencePackage): Promise<void> {
+  const packageName = enriched.package_name;
   const metadata: CompetitorMetadata = {packageName,version:enriched.published_version,description:enriched.description,topics:enriched.topics};
   const result: CompetitorClassification = {relationship:enriched.relationship,capabilityCategory:enriched.capability_category,
     rationale:enriched.rationale,matchedTerms:enriched.actions,capabilities:enriched.capabilities};
@@ -440,7 +445,7 @@ export async function enrichCompetitor(
     metadata.version,
     metadata.description || null,
     JSON.stringify(metadata.topics),
-    capturedAt,
+    enriched.metadata_captured_at,
     result.rationale,
     JSON.stringify(result.matchedTerms),
     metrics.occurrenceCount,
@@ -450,6 +455,13 @@ export async function enrichCompetitor(
     runId,
     packageName,
   ).run();
+}
+
+/** Derived comparisons follow changed evidence; immutable report artifacts are untouched. */
+export async function updatePackageComparisons(env: Env, enriched: IntelligencePackage): Promise<void> {
+  const reports = await env.DB.prepare("SELECT run_id FROM competitor_classifications WHERE package_name=? AND status IN ('complete','failed')")
+    .bind(enriched.package_name).all<{run_id:string}>();
+  for (const report of reports.results) await persistPackageClassification(env, report.run_id, enriched);
 }
 
 export async function recordCompetitorRetry(

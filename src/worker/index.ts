@@ -13,6 +13,7 @@ import { recordDiagnostic } from "./retention.js";
 import { createRun, markDeadLetter } from "./run-service.js";
 import { RetryableScanError, recordRetry, scanQuery, retryDelay } from "./scanner.js";
 import { startIntelligence, processIntelligenceJob, failIntelligenceJob } from "./intelligence.js";
+import { PubdevDeferredError } from "./pubdev.js";
 import {
   PermanentCompetitorError,
   RetryableCompetitorError,
@@ -73,6 +74,7 @@ async function handleQueueMessage(
       await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);
       message.ack();
     } catch (error) {
+      if (await deferPubdev(message,env,error)) return;
       const permanent = error instanceof PermanentCompetitorError;
       await failIntelligenceJob(env, message.body.jobId, error, permanent);
       if (permanent) message.ack();
@@ -122,6 +124,7 @@ async function handleQueueMessage(
       }
       message.ack();
     } catch (error) {
+      if (await deferPubdev(message,env,error)) return;
       if (error instanceof PermanentCompetitorError) {
         await markCompetitorFailed(env, message.body.runId, message.body.packageName, error);
         const completion = await completeCompetitorEnrichment(env, message.body.runId);
@@ -152,6 +155,7 @@ async function handleQueueMessage(
     await scanQuery(env, message.body.runId, message.body.queryId, message.attempts);
     message.ack();
   } catch (error) {
+    if (await deferPubdev(message,env,error)) return;
     const retryable = error instanceof RetryableScanError
       ? error
       : new RetryableScanError(
@@ -162,6 +166,15 @@ async function handleQueueMessage(
     await recordRetry(env, message.body.runId, message.body.queryId, retryable);
     message.retry({ delaySeconds: retryable.delaySeconds });
   }
+}
+
+async function deferPubdev(message: Message<AuditQueueMessage>, env: Env, error: unknown): Promise<boolean> {
+  if (!(error instanceof PubdevDeferredError)) return false;
+  // A shared cooldown is scheduling, not a failed attempt for every queued query.
+  // Re-send before acknowledging so a failed Queue write cannot lose the job.
+  await env.SCAN_QUEUE.send(message.body,{delaySeconds:error.delaySeconds});
+  message.ack();
+  return true;
 }
 
 export default {
