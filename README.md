@@ -327,4 +327,6 @@ These commands read `DEEPLINKX_VISIBILITY_ADMIN_TOKEN` from the environment and 
 
 Migration `0004_competitor_intelligence.sql` adds the registry, permanent metric observations/discoveries/reviews, and durable background jobs. Public evidence is permanent. Raw pub.dev bodies follow the existing 90-day internal retention policy; they are never committed. Storage estimates include the new tables, and batch dispatch checks storage safeguards.
 
+Migration `0005_competitor_lookup_index.sql` indexes package/status lookups so shared evidence updates do not repeatedly scan the complete classification history.
+
 After a deployment, synchronize the committed catalog from GitHub main and check its hash/counts before manual runs. Publish the reviewed catalog commit to main so a later scheduled sync cannot reactivate an older bundled catalog. Use unique idempotency keys for the weekly and monthly manual runs and wait for both report materialization and separate classification/job completion. For historical derived views, use the existing protected backfill without rewriting raw reports or exports.

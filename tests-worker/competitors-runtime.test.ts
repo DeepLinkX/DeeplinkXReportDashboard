@@ -201,6 +201,8 @@ describe("competitor classification runtime", () => {
     });
   });
   it("updates derived comparisons from changed evidence without changing raw history or exports", async () => {
+    const plan=await env.DB.prepare("EXPLAIN QUERY PLAN SELECT run_id FROM competitor_classifications WHERE package_name='map_launcher' AND status IN ('complete','failed')").all<{detail:string}>();
+    expect(plan.results.some(row=>row.detail.includes("competitor_classifications_package_status"))).toBe(true);
     await env.DB.prepare("INSERT INTO report_artifacts(id,run_id,artifact_type,filename,content_type,content,content_hash,created_at) VALUES('review-artifact','classified-run','json','review-fixture.json','application/json','original report','original-hash','2026-09-02')").run();
     const raw=await env.DB.prepare("SELECT * FROM competitors WHERE run_id='classified-run'").all();
     await updatePackageComparisons(env, {package_name:"map_launcher",published_version:"6.0.0",description:"Reviewed evidence",topics:[],metadata_captured_at:"2026-09-19T00:00:00Z",relationship:"noise",capability_category:"other",rationale:"Reviewed correction",actions:[],capabilities:[]} as unknown as IntelligencePackage);
