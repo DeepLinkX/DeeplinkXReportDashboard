@@ -30,6 +30,10 @@ describe("capability discovery",()=>{
  it("does not infer unrelated provider actions from a different section",()=>{
   const result=analyze("mixed_links","Open WhatsApp and Telegram.","Telegram open profile. WhatsApp share text.");
   expect(result.capabilities.some(c=>c.provider==="WhatsApp"&&c.action==="openProfile")).toBe(false);
+  const store=analyze("store_redirect","Redirect users to an app page in Google Play Store.","Share this package. Add a dependency to the pubspec.yaml file. Create a new Flutter project.");
+  expect(store.actions).not.toContain("shareFiles");expect(store.actions).not.toContain("buildUrl");
+  const maps=analyze("map_launcher","Find installed maps and launch directions.","Supported: NAVER Map. Waze map.");
+  expect(maps.capabilities.some(c=>c.action==="view")).toBe(false);
  });
  it("keeps actual inbound handlers adjacent and UI/backend packages outside direct competitors",()=>{
   expect(analyze("app_links","Handle incoming universal links and custom URL schemes.").relationship).toBe("adjacent");

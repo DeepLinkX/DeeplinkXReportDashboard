@@ -1,7 +1,7 @@
 import { semanticText } from "./catalog.js";
 import type { CapabilityMatch, PackageAnalysis, ProductCapability } from "./intelligence.js";
 
-export const ANALYSIS_VERSION = "capabilities-v2.1";
+export const ANALYSIS_VERSION = "capabilities-v2.2";
 
 export interface AnalysisEvidence {
   name: string;
@@ -40,9 +40,10 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
   const inbound = /\b(?:receiv(?:e|es|ing)|incoming|inbound|handl(?:e|er|es|ing)|routing|router)\b/.test(normalized)
     && /\b(?:links?|url|uri|schemes?)\b/.test(normalized);
 
-  function add(provider: string, action: string, expression: RegExp, apiAction?: string, extra: string[] = []) {
-    const evidence = chunks.find((chunk) => expression.test(semanticText(chunk)) && (provider === "General" || contains(chunk, provider)))
-      ?? (providers.length === 1 && providers[0] === provider ? chunks.find((chunk) => expression.test(semanticText(chunk))) : undefined);
+  function add(provider: string, action: string, expression: RegExp, apiAction?: string, extra: string[] = [], requires?: RegExp) {
+    const qualifies = (chunk: string) => expression.test(semanticText(chunk)) && (!requires || requires.test(semanticText(chunk)));
+    const evidence = chunks.find((chunk) => qualifies(chunk) && (provider === "General" || contains(chunk, provider)))
+      ?? (providers.length === 1 && providers[0] === provider ? chunks.find(qualifies) : undefined);
     if (!evidence) return;
     const apis = inventory.filter((capability) => capability.provider === provider && capability.action === (apiAction ?? action));
     matches.push({ provider, action, evidence: evidence.slice(0, 600),
@@ -63,13 +64,13 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
         }
         if (/\b(?:chat|phone number|click to chat)\b/.test(normalized)) add(provider, "chat", /\b(?:chat|phone number)\b/);
         if (/\b(?:shar\w*|send\w*)\b/.test(normalized) && /\b(?:files?|images?|videos?|media|stories|stickers?)\b/.test(normalized)) {
-          add(provider, "shareFiles", /\b(?:files?|images?|videos?|media|stories|stickers?)\b/, "shareFiles", ["DeeplinkX text/URL actions do not establish native file, media, or story sharing support."]);
+          add(provider, "shareFiles", /\b(?:files?|images?|videos?|media|stories|stickers?)\b/, "shareFiles", ["DeeplinkX text/URL actions do not establish native file, media, or story sharing support."], /\b(?:shar\w*|send\w*)\b/);
         }
       }
       for (const capability of capabilities.filter((c) => !["open", "shareText", "chat"].includes(c.action))) {
         const phrase = capability.phrases.find((value) => contains(normalized, value));
         if (!phrase || !(launch || outbound || /\b(?:directions|navigation|map launcher)\b/.test(normalized))) continue;
-        add(provider, capability.action, new RegExp(`\\b${semanticText(phrase).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`));
+        add(provider, capability.action, new RegExp(`\\b${semanticText(phrase).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`), undefined, [], /\b(?:launch\w*|open\w*|show\w*|view\w*|search\w*|navigat\w*|directions|send\w*|creat\w*|join\w*|watch\w*|rate\w*)\b/);
       }
     }
     if (/\b(?:map launcher|maps launcher|launch maps|available maps installed|maps installed)\b/.test(normalized)) {
@@ -87,7 +88,7 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
     if (genericShare && /\b(?:files?|images?|videos?)\b/.test(normalized)) add("General","shareFiles",/\b(?:files?|images?|videos?)\b/);
     // Builders can compete for an outbound action without launching it directly.
     if (!genericShare && providers.length && /\b(?:build\w*|creat\w*|generat\w*|interact)\b/.test(normalized) && /\b(?:http links|links|uri|url)\b/.test(normalized)) {
-      for (const provider of providers) add(provider, "buildUrl", /\b(?:build\w*|creat\w*|generat\w*|interact)\b/, "buildUrl", ["Pure-Dart/URI-only use and input normalization need separate assessment; DeeplinkX is a Flutter package."]);
+      for (const provider of providers) add(provider, "buildUrl", /\b(?:build\w*|creat\w*|generat\w*|interact)\b/, "buildUrl", ["Pure-Dart/URI-only use and input normalization need separate assessment; DeeplinkX is a Flutter package."], /\b(?:links?|uri|url)\b/);
     }
   }
   const unique = [...new Map(matches.map((match) => [`${match.provider}:${match.action}`, match])).values()];
