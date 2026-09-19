@@ -1,4 +1,5 @@
 import type { AuditProfile } from "../shared/types.js";
+import { isD1DailyQuotaError, quotaResetDelay } from "./quota.js";
 import { directoryResponse, packageResponse, startIntelligence, exportReview, importReview } from "./intelligence.js";
 import { canonicalizePackageSnapshots, compareQuerySets, type MovementQuery } from "../shared/movement.js";
 import { activateBundledCatalog, syncCatalog } from "./catalog-store.js";
@@ -403,14 +404,14 @@ async function admin(
       const body=await bodyJson<{packages:string[]}>(request);
       if (!Array.isArray(body.packages)) return errorResponse(400,"packages must be an array.");
       return json(await exportReview(env,body.packages),{headers:{"cache-control":"no-store"}});
-    } catch (error) {return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
+    } catch (error) {if(isD1DailyQuotaError(error)) throw error;return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
   }
   if (path === "/api/v1/admin/competitors/review/import" && request.method === "POST") {
     try {
       await importReview(env,await bodyJson<Parameters<typeof importReview>[1]>(request));
       await invalidate([MUTABLE_CACHE_TAG]);
       return json({status:"reviewed"},{headers:{"cache-control":"no-store"}});
-    } catch (error) {return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
+    } catch (error) {if(isD1DailyQuotaError(error)) throw error;return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
   }
   if (path === "/api/v1/admin/runs" && request.method === "POST") {
     const body = await bodyJson<{ profile?: AuditProfile }>(request);
@@ -465,7 +466,7 @@ export async function handlePublicApi(request: Request, env: Env): Promise<Respo
     if (request.method !== "GET") return errorResponse(405, "Method not allowed.");
     if (path === "/api/v1/competitors") {
       try { return withPublicCache(json(await directoryResponse(env,url)),"mutable",[MUTABLE_CACHE_TAG]); }
-      catch (error) { return errorResponse(400,error instanceof Error?error.message:"Invalid filters."); }
+      catch (error) { if(isD1DailyQuotaError(error)) throw error; return errorResponse(400,error instanceof Error?error.message:"Invalid filters."); }
     }
     const packageMatch=path.match(/^\/api\/v1\/competitors\/([a-z][a-z0-9_]*)$/);
     if (packageMatch) {
@@ -510,6 +511,7 @@ export async function handlePublicApi(request: Request, env: Env): Promise<Respo
     if (exportMatch) return withPublicCache(await exportArtifact(env, exportMatch[1], exportMatch[2]), "immutable");
     return errorResponse(404, "API endpoint not found.");
   } catch (error) {
+    if (isD1DailyQuotaError(error)) return quotaUnavailable();
     if (error instanceof HistoryInputError) return errorResponse(error.status, error.message);
     return errorResponse(500, error instanceof Error ? error.message : "Unexpected service error.");
   }
@@ -533,9 +535,14 @@ export async function handleUncachedApi(
     }
     return errorResponse(404, "API endpoint not found.");
   } catch (error) {
+    if (isD1DailyQuotaError(error)) return quotaUnavailable();
     if (error instanceof PermanentCompetitorError) {
       return errorResponse(error.code === "backfill-idempotency-conflict" ? 409 : 400, error.message);
     }
     return errorResponse(500, error instanceof Error ? error.message : "Unexpected service error.");
   }
+}
+
+function quotaUnavailable(): Response {
+  return json({error:"Cloudflare D1 daily quota reached. Queued work resumes after the UTC daily reset."},{status:503,headers:{"cache-control":"no-store","retry-after":String(quotaResetDelay())}});
 }

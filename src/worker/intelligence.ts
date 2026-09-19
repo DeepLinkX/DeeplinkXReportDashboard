@@ -13,7 +13,7 @@ const catalog = bundledCatalog as unknown as { source_commit: string; capabiliti
 type RegistryRow = Record<string, unknown>;
 interface Metadata { name: string; version: string | null; published: string | null; description: string; topics: string[]; repository: string | null; }
 interface Score { downloads_30d: number | null; likes: number | null; points: number | null; max_points: number | null; platforms: string[]; }
-interface Job { id: string; run_id: string | null; kind: "package" | "search" | "dispatch"; subject: string; status: string; next_page: number; result_count: number; }
+interface Job { id: string; run_id: string | null; kind: "package" | "search" | "dispatch"; subject: string; status: string; next_page: number; result_count: number; created_at: string; }
 const now = () => new Date().toISOString();
 function upstreamJson(body:string,attempts:number): any {
   try {return JSON.parse(body);} catch {throw new RetryableCompetitorError("Upstream returned invalid JSON.",retryDelay(null,attempts),"intelligence-invalid-json");}
@@ -64,7 +64,7 @@ async function stageError(env: Env, name: string, stage: "metadata" | "metrics" 
 }
 
 /** Each successful resource is durable before the next request; retries reuse it. */
-export async function refreshPackage(env: Env, name: string, attempts = 1, runId?: string): Promise<IntelligencePackage> {
+export async function refreshPackage(env: Env, name: string, attempts = 1, runId?: string, metricsNotBefore?: string): Promise<IntelligencePackage> {
   if (!validPackageName(name)) throw new PermanentCompetitorError("Invalid package name.", "invalid-package");
   await registerPackage(env, name);
   let row = (await env.DB.prepare("SELECT * FROM competitor_registry WHERE package_name=?").bind(name).first<RegistryRow>())!;
@@ -102,7 +102,8 @@ export async function refreshPackage(env: Env, name: string, attempts = 1, runId
   // Never apply an old release's README to a newly published release.
   const documentation = row.documentation_version === metadata.version ? String(row.documentation_text ?? "") : "";
   let analysis = analyzePackage({ ...preliminary, documentation, documentation_url: `https://pub.dev/packages/${name}/versions/${metadata.version}` }, catalog.capabilities);
-  if ((likely || analysis.relationship === "direct" || analysis.relationship === "adjacent") && !fresh(row.metrics_captured_at, 7)) {
+  const needsMetrics = !fresh(row.metrics_captured_at, 7) || Boolean(metricsNotBefore && String(row.metrics_captured_at ?? "") < metricsNotBefore);
+  if ((likely || analysis.relationship === "direct" || analysis.relationship === "adjacent") && needsMetrics) {
     try {
       const payload = upstreamJson(await capturedFetch(env, `${url}/score`, `competitor-score:${name}`, attempts, runId), attempts);
       if (!["likeCount", "grantedPoints", "downloadCount30Days"].some((key) => key in payload)) throw new Error("Invalid score response shape.");
@@ -263,7 +264,7 @@ export async function startIntelligence(env: Env, key: string, runId?: string, f
     : "WHERE relationship IN ('direct','adjacent') OR downloads_30d IS NOT NULL OR package_name IN ('whatsapp_unilink','whatsapp_share','appinio_social_share','map_launcher','store_redirect')";
   const insert = env.DB.prepare(`INSERT OR IGNORE INTO intelligence_jobs(id,run_id,kind,subject,created_at,updated_at)
     SELECT ?||':package:'||package_name,?,'package',package_name,?,? FROM competitor_registry cr ${condition}`);
-  await (full ? insert.bind(key,runId??null,stamp,stamp,runId??null) : insert.bind(key,runId??null,stamp,stamp)).run();
+  await (full ? insert.bind(key,runId??null,stamp,stamp,runId??null) : insert.bind(`${key}:metrics`,runId??null,stamp,stamp)).run();
   const searchJobs:Array<{id:string;subject:string}>=[];
   let searches = 0;
   if (full) {
@@ -298,7 +299,7 @@ export async function processIntelligenceJob(env: Env, jobId: string, attempts: 
     return;
   }
   if (job.kind === "package") {
-    await refreshPackage(env,job.subject,attempts,job.run_id??undefined);
+    await refreshPackage(env,job.subject,attempts,job.run_id??undefined,job.id.includes(":metrics:package:")?job.created_at:undefined);
     await env.DB.prepare("UPDATE intelligence_jobs SET status='complete',error=NULL,updated_at=? WHERE id=?").bind(now(),jobId).run();
     return;
   }

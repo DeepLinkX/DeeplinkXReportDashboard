@@ -14,6 +14,7 @@ import { createRun, markDeadLetter } from "./run-service.js";
 import { RetryableScanError, recordRetry, scanQuery, retryDelay } from "./scanner.js";
 import { startIntelligence, processIntelligenceJob, failIntelligenceJob } from "./intelligence.js";
 import { PubdevDeferredError } from "./pubdev.js";
+import { isD1DailyQuotaError, quotaResetDelay } from "./quota.js";
 import {
   PermanentCompetitorError,
   RetryableCompetitorError,
@@ -74,6 +75,7 @@ async function handleQueueMessage(
       await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);
       message.ack();
     } catch (error) {
+      if (isD1DailyQuotaError(error)) throw error;
       if (await deferPubdev(message,env,error)) return;
       const permanent = error instanceof PermanentCompetitorError;
       await failIntelligenceJob(env, message.body.jobId, error, permanent);
@@ -100,6 +102,7 @@ async function handleQueueMessage(
       );
       message.ack();
     } catch (error) {
+      if (isD1DailyQuotaError(error)) throw error;
       await recordDiagnostic(env, {
         runId: message.body.runId,
         severity: "warning",
@@ -124,6 +127,7 @@ async function handleQueueMessage(
       }
       message.ack();
     } catch (error) {
+      if (isD1DailyQuotaError(error)) throw error;
       if (await deferPubdev(message,env,error)) return;
       if (error instanceof PermanentCompetitorError) {
         await markCompetitorFailed(env, message.body.runId, message.body.packageName, error);
@@ -155,6 +159,7 @@ async function handleQueueMessage(
     await scanQuery(env, message.body.runId, message.body.queryId, message.attempts);
     message.ack();
   } catch (error) {
+    if (isD1DailyQuotaError(error)) throw error;
     if (await deferPubdev(message,env,error)) return;
     const retryable = error instanceof RetryableScanError
       ? error
@@ -208,47 +213,58 @@ export default {
 
   async queue(batch, env, context): Promise<void> {
     for (const message of batch.messages) {
-      if (batch.queue === "deeplinkx-visibility-dlq") {
-        try {
-          const detail = `Exhausted Queue retries after ${message.attempts} attempts.`;
-          if (message.body.kind === "intelligence") {
-            await failIntelligenceJob(env, message.body.jobId, detail, true);
-            await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);
+      try {
+        if (batch.queue === "deeplinkx-visibility-dlq") {
+          try {
+            const detail = `Exhausted Queue retries after ${message.attempts} attempts.`;
+            if (message.body.kind === "intelligence") {
+              await failIntelligenceJob(env, message.body.jobId, detail, true);
+              await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);
+              message.ack();
+              continue;
+            }
+            if (message.body.kind === "classify-competitors") {
+              await recordDiagnostic(env, {runId:message.body.runId,severity:"error",code:"classification-dispatch-failed",detail});
+              message.ack();
+              continue;
+            }
+            if (message.body.kind === "enrich-competitor") {
+              await markCompetitorFailed(env, message.body.runId, message.body.packageName, {
+                code: "competitor-dead-letter",
+                message: detail,
+              });
+              await completeCompetitorEnrichment(env, message.body.runId);
+            } else {
+              await markDeadLetter(env, message.body, detail);
+            }
+            await invalidatePublicCache(
+              context,
+              env,
+              [MUTABLE_CACHE_TAG, runCacheTag(message.body.runId)],
+              message.body.runId,
+            );
             message.ack();
-            continue;
-          }
-          if (message.body.kind === "classify-competitors") {
-            await recordDiagnostic(env, {runId:message.body.runId,severity:"error",code:"classification-dispatch-failed",detail});
-            message.ack();
-            continue;
-          }
-          if (message.body.kind === "enrich-competitor") {
-            await markCompetitorFailed(env, message.body.runId, message.body.packageName, {
-              code: "competitor-dead-letter",
-              message: detail,
+          } catch (error) {
+            if (isD1DailyQuotaError(error)) throw error;
+            await recordDiagnostic(env, {
+              severity: "error",
+              code: "dead-letter-handler-failed",
+              detail: error instanceof Error ? error.message : String(error),
             });
-            await completeCompetitorEnrichment(env, message.body.runId);
-          } else {
-            await markDeadLetter(env, message.body, detail);
+            message.retry({ delaySeconds: 300 });
           }
-          await invalidatePublicCache(
-            context,
-            env,
-            [MUTABLE_CACHE_TAG, runCacheTag(message.body.runId)],
-            message.body.runId,
-          );
-          message.ack();
-        } catch (error) {
-          await recordDiagnostic(env, {
-            severity: "error",
-            code: "dead-letter-handler-failed",
-            detail: error instanceof Error ? error.message : String(error),
-          });
-          message.retry({ delaySeconds: 300 });
+          continue;
         }
-        continue;
+        await handleQueueMessage(message, env, context);
+      } catch (error) {
+        if (!isD1DailyQuotaError(error)) throw error;
+        const delaySeconds = quotaResetDelay();
+        // D1 cannot even store diagnostics at its daily limit. Preserve the
+        // original job in Queue without consuming retries or fabricating dates.
+        await env.SCAN_QUEUE.send(message.body,{delaySeconds});
+        console.warn(JSON.stringify({code:"d1-daily-quota-deferred",delay_seconds:delaySeconds,kind:message.body.kind}));
+        message.ack();
       }
-      await handleQueueMessage(message, env, context);
     }
   },
 } satisfies ExportedHandler<Env, AuditQueueMessage>;

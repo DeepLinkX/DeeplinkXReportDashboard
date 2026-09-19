@@ -262,6 +262,14 @@ npx wrangler d1 export deeplinkx-visibility \
 
 Keep dated backups outside the Dart package and worktree. Do not copy live D1 files or commit exports.
 
+### Daily quota recovery
+
+The 1,500-query ceiling is a coverage bound, not a guarantee that a full audit and competitor enrichment fit in a free D1 day. D1 Free currently allows 100,000 rows written and 5 million rows read per account per UTC day; indexes also contribute writes. Scans, checkpoints, registry discovery, metrics, and classification share that allowance. A large run can span multiple daily resets. See [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) for current limits and paid-plan terms.
+
+When D1 reports a daily read/write quota error, the consumer reschedules the original message before acknowledging it, without consuming its retry allowance. It waits until 00:01 UTC after the next reset, in chunks of at most 12 hours (the Queue delay limit). Existing run dates, query progress, and public history stay intact; quota diagnostics go to Worker logs because D1 cannot accept them. Affected API requests return `503`, `Retry-After`, and `Cache-Control: no-store`. Successful read-only endpoints may remain available during a write-only limit. Quota waits are not completed scans or evidence of package absence.
+
+Inspect Worker logs for `d1-daily-quota-deferred`, verify that the original run resumes after reset, and let its enrichment finish before assessing completeness. Never delete history or invent a new run date to bypass quota or daily report conflicts. A paid-plan change requires separate billing authorization; deployment does not authorize it.
+
 ### Dead-letter and incomplete-run recovery
 
 1. Inspect Worker logs and the private `diagnostic_events` rows without copying credentials or raw responses into an issue.
@@ -309,6 +317,8 @@ The deterministic `capabilities-v2.3` classifier records multiple provider/actio
 ### Refresh, expansion discovery, and review
 
 Complete full reports trigger registry import, all-candidate classification, and supplemental discovery. Complete pulse reports refresh the relevant directory plus selected review candidates. Successful metadata and score resources are shared for seven days, README evidence for 30 days or until version change. Each successful resource is checkpointed before the next request; all outbound requests in the enrichment/discovery pipeline are sequential and honor `Retry-After`. Evidence/classifier/product changes invalidate old review decisions.
+
+Each pulse or explicit metrics refresh captures a score observation after its job was created, even when the previous score is less than seven days old. Retries reuse a successful observation from that same job; monthly discovery reuses fresh weekly metrics.
 
 The scan and enrichment consumer spaces pub.dev requests by at least two seconds. HTTP 429 establishes a shared durable cooldown for all queued pub.dev work (at least 60 seconds, or the longer `Retry-After`). Waiting jobs are rescheduled without consuming their failure retry allowance, and saved page/resource checkpoints remain intact. Changed evidence and reviewed decisions also refresh derived per-run comparisons without rewriting immutable report exports.
 

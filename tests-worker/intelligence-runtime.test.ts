@@ -27,6 +27,16 @@ describe("persistent competitor intelligence",()=>{
   vi.spyOn(globalThis,"fetch").mockResolvedValueOnce(Response.json(metadata("partial_links"))).mockResolvedValueOnce(new Response(doc)).mockResolvedValueOnce(new Response("missing",{status:404}));
   const result=await refreshPackage(env,"partial_links");expect(result).toMatchObject({relationship:"direct",downloads_30d:null,refresh_status:"partial"});expect(result.metrics_error).toContain("404");
  });
+ it("refreshes weekly scores even within the shared cache window and checkpoints that refresh",async()=>{
+  const fetcher=vi.spyOn(globalThis,"fetch").mockResolvedValueOnce(Response.json(metadata("weekly_links"))).mockResolvedValueOnce(new Response(doc)).mockResolvedValueOnce(Response.json(score));
+  await refreshPackage(env,"weekly_links");
+  await env.DB.prepare("UPDATE competitor_registry SET metrics_captured_at=? WHERE package_name='weekly_links'").bind(new Date(Date.now()-86400000).toISOString()).run();
+  const cutoff=new Date().toISOString();
+  fetcher.mockResolvedValueOnce(Response.json({...score,downloadCount30Days:1400}));
+  expect((await refreshPackage(env,"weekly_links",1,undefined,cutoff)).downloads_30d).toBe(1400);
+  await refreshPackage(env,"weekly_links",2,undefined,cutoff);
+  expect(fetcher).toHaveBeenCalledTimes(4);
+ });
  it("rejects stale review packets and persists an evidence-matched review",async()=>{
   vi.spyOn(globalThis,"fetch").mockResolvedValueOnce(Response.json(metadata("review_links"))).mockResolvedValueOnce(new Response(doc)).mockResolvedValueOnce(Response.json(score));
   const result=await refreshPackage(env,"review_links");
