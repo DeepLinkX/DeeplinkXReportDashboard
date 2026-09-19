@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApi, number, formatDate } from "./api-client.js";
 import { DIRECTORY_SORTS, type IntelligencePackage } from "../shared/intelligence.js";
@@ -24,6 +24,23 @@ function PackageEvidence({name}:{name:string}) {
 
 export function CompetitorDirectory() {
   const [params,setParams]=useSearchParams();
+  const query = params.get("q") ?? "";
+  const [search,setSearch]=useState(query);
+  const committedSearch=useRef<string|null>(null);
+  useEffect(()=>{
+    if(committedSearch.current===query) {committedSearch.current=null;return;}
+    setSearch(query);
+  },[query]);
+  useEffect(()=>{
+    if(search===query) return;
+    const timeout=setTimeout(()=>{
+      const next=new URLSearchParams(params);
+      search?next.set("q",search):next.delete("q");next.delete("page");
+      committedSearch.current=search;
+      setParams(next,{replace:true});
+    },250);
+    return ()=>clearTimeout(timeout);
+  },[search,query,params,setParams]);
   const [expanded,setExpanded]=useState<string|null>(null);
   const state=useApi<Directory>(`/api/v1/competitors?${params.toString()}`);
   const data=state.data;
@@ -32,7 +49,7 @@ export function CompetitorDirectory() {
   return <section className="page-section"><header className="page-heading"><p className="eyebrow">Competitor discovery</p><h1>Alternatives and opportunities.</h1><p>Compare external-app actions, migration caveats, and package metrics. Downloads count package downloads over 30 days; search appearances measure bounded visibility.</p></header>
     <div className="segmented" role="group" aria-label="Competitor view">{["direct","adjacent","expansion","unresolved","noise","all"].map((view)=><button key={view} type="button" aria-pressed={(params.get("view")??"direct")===view} onClick={()=>update("view",view)}>{view[0].toUpperCase()+view.slice(1)}</button>)}</div>
     <div className="competitor-filters">
-      <label>Package search<input aria-label="Package search" value={params.get("q")??""} onChange={(e)=>update("q",e.target.value)} placeholder="Package or description" /></label>
+      <label>Package search<input aria-label="Package search" value={search} maxLength={120} onChange={(e)=>setSearch(e.target.value)} placeholder="Package or description" /></label>
       {select("provider","App or store",data?.facets.providers??[])}{select("action","Action",data?.facets.actions??[])}{select("platform","Platform",data?.facets.platforms??[])}
       {select("relationship","Relationship",["direct","adjacent","noise","unknown"])}{select("migration","Migration",["supported","partial","unsupported","needs_review"])}
       {select("review","Review status",["reviewed","rule_matched","needs_review"])}
