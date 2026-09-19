@@ -1,7 +1,7 @@
 import { semanticText } from "./catalog.js";
 import type { CapabilityMatch, PackageAnalysis, ProductCapability } from "./intelligence.js";
 
-export const ANALYSIS_VERSION = "capabilities-v2";
+export const ANALYSIS_VERSION = "capabilities-v2.1";
 
 export interface AnalysisEvidence {
   name: string;
@@ -32,7 +32,9 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
   const genericShare = /platform share (ui|dialog)|system share sheet|native share dialog/.test(metaText(metadata));
   const noise = /\b(?:icon(?:s|ify)?|font(?:s)?|ui kit|chat bubbles|state management|database|logger|logging)\b/.test(meta);
   const pureNoise = /\b(?:icon pack|icons pack|icon set|icons set|iconify|font icons|brand icons|launcher icon|dynamic icon|chat bubbles|state management|database|logging)\b/.test(meta);
-  const backend = /\b(?:cloud api|business api|rest api|chatbot|chat bot|bot api|authentication|otp verification)\b/.test(meta);
+  const backend = /\b(?:cloud api|business api|rest api|web services?|webservices|directions api|place apis|chatbot|chat bot|bot api|authentication|otp verification)\b/.test(meta);
+  const embeddedMap = /\b(?:vector map|map control|map widgets?|maps? sdk|map snapshots?|static apple maps snapshots|drawing routes|map previews)\b/.test(meta)
+    && !/\b(?:launch\w*|external|installed maps|maps installed)\b/.test(meta);
   const launch = /\b(?:launch(?:es|ing)?|open(?:s|ing)?|redirect(?:s|ing)?)\b/.test(normalized);
   const outbound = /\b(?:share|sharing|send|sending|chat|interact|build|building|create|creating|generate|generating)\b/.test(normalized);
   const inbound = /\b(?:receiv(?:e|es|ing)|incoming|inbound|handl(?:e|er|es|ing)|routing|router)\b/.test(normalized)
@@ -51,7 +53,7 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
     });
   }
 
-  if (!pureNoise && !backend) {
+  if (!pureNoise && !backend && !embeddedMap) {
     for (const provider of genericShare ? [] : providers) {
       const capabilities = inventory.filter((item) => item.provider === provider);
       if (launch) add(provider, "open", /\b(?:launch\w*|open\w*|redirect\w*)\b/);
@@ -93,7 +95,7 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
   const relevant = unique.length > 0;
   const adjacent = inbound || /\b(?:url launcher|launching a url|app availability|installed apps|dynamic links?|deferred links?|deep links?|deeplink)\b/.test(normalized);
   const metadataFunctional = /launch|link|redirect|navigation|directions|interact|shar|send|availability|installed/.test(meta);
-  const relationship = direct && metadataFunctional ? "direct" : relevant || (!pureNoise && !backend && adjacent) ? "adjacent" : pureNoise || noise || backend ? "noise" : "unknown";
+  const relationship = direct && metadataFunctional ? "direct" : relevant || (!pureNoise && !backend && !embeddedMap && adjacent) ? "adjacent" : pureNoise || noise || backend || embeddedMap ? "noise" : "unknown";
   const category = unique.some((m) => m.action === "mapLauncher") ? "map/navigation launcher"
     : unique.some((m) => m.action === "storeLauncher") ? "store redirect and fallback"
     : unique.some((m) => m.action === "appLauncher") ? "external app launcher"

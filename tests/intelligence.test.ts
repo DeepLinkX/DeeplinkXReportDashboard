@@ -36,6 +36,9 @@ describe("capability discovery",()=>{
   expect(analyze("iconify_flutter_plus","100 open source icon sets for Flutter", "WhatsApp icons and Telegram share icons").relationship).toBe("noise");
   expect(analyze("whatsapp_cloud","WhatsApp Cloud API for sending messages.").relationship).toBe("noise");
   expect(analyze("chat_bubbles","WhatsApp chat bubbles UI").relationship).toBe("noise");
+  expect(analyze("flutter_google_maps_webservices","Google maps web services for flutter (Geocoding, Places, Directions, Distance Matrix)").relationship).toBe("noise");
+  expect(analyze("tmap_flutter_sdk","A Flutter plugin for TMAP (SK Open API) Vector Map v3. Supports markers and route planning.").relationship).toBe("noise");
+  expect(analyze("apple_map_snapshotter","Generate static Apple Maps snapshots on iOS using MapKit.").relationship).toBe("noise");
  });
  it("isolates README evidence from dependencies and scripts",()=>{
   expect(readmeText('<section class="tab-content detail-tab-readme"><p>Share WhatsApp text</p><script>noise()</script></section><aside>Telegram profile</aside>')).toBe("Share WhatsApp text");

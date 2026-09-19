@@ -64,14 +64,14 @@ beforeAll(async () => {
         package_url, rationale, relevant_occurrence_count, relevant_best_rank,
         relevant_median_rank, updated_at
       ) VALUES ('classified-run', 'map_launcher', 'complete', 'direct', 'map/navigation launcher',
-        'capabilities-v2', 'https://pub.dev/packages/map_launcher', 'Launches installed maps.', 1, 2, 2, ?)`,
+        'capabilities-v2.1', 'https://pub.dev/packages/map_launcher', 'Launches installed maps.', 1, 2, 2, ?)`,
     ).bind("2026-09-02T00:00:00.000Z"),
     env.DB.prepare(
       `INSERT INTO competitor_classifications (
         run_id, package_name, status, relationship, capability_category, classifier_version,
         package_url, rationale, relevant_occurrence_count, updated_at
       ) VALUES ('classified-run', 'iconify_flutter_plus', 'complete', 'noise', 'other',
-        'capabilities-v2', 'https://pub.dev/packages/iconify_flutter_plus', 'Icon package.', 0, ?)`,
+        'capabilities-v2.1', 'https://pub.dev/packages/iconify_flutter_plus', 'Icon package.', 0, ?)`,
     ).bind("2026-09-02T00:00:00.000Z"),
   ]);
   await insertRun("legacy-without-positions", false);
@@ -164,7 +164,7 @@ describe("competitor classification runtime", () => {
       `SELECT status, classifier_version, COUNT(*) AS count FROM competitor_classifications
        WHERE run_id = 'resumable-run' GROUP BY status, classifier_version`,
     ).all<{ status: string; classifier_version: string; count: number }>();
-    expect(states.results).toEqual([{ status: "queued", classifier_version: "capabilities-v2", count: 2 }]);
+    expect(states.results).toEqual([{ status: "queued", classifier_version: "capabilities-v2.1", count: 2 }]);
   });
 
   it("records retry state and converts permanent metadata failure to honest unknown", async () => {

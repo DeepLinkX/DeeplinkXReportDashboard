@@ -1,5 +1,5 @@
 import bundledCatalog from "../../catalog/catalog-v3.json";
-import { analyzePackage } from "../shared/competitor-analysis.js";
+import { analyzePackage, ANALYSIS_VERSION } from "../shared/competitor-analysis.js";
 import type { ProductCapability } from "../shared/intelligence.js";
 import { refreshPackage } from "./intelligence.js";
 import type { CapabilityMatch } from "../shared/intelligence.js";
@@ -8,7 +8,7 @@ import type { CompetitorRelationship } from "../shared/types.js";
 import { retryDelay } from "./scanner.js";
 import { recordDiagnostic, storeRawBody } from "./retention.js";
 
-export const COMPETITOR_CLASSIFIER_VERSION = "capabilities-v2";
+export const COMPETITOR_CLASSIFIER_VERSION = ANALYSIS_VERSION;
 
 
 const STATEMENT_CHUNK = 75;
