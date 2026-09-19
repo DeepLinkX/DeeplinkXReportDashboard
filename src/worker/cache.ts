@@ -1,4 +1,5 @@
 export const MUTABLE_CACHE_TAG = "visibility:mutable";
+import { DIRECTORY_FILTERS } from "../shared/intelligence.js";
 
 export type PublicCachePolicy = "live" | "mutable" | "immutable";
 
@@ -27,6 +28,7 @@ const HISTORY_OUTCOMES = [
   "withheld",
 ] as const;
 const DEFAULT_HISTORY_OUTCOMES = HISTORY_OUTCOMES.slice(0, 4);
+const COMPETITOR_RELATIONSHIPS = ["direct", "adjacent", "noise", "unknown"] as const;
 
 function normalizedPath(pathname: string): string {
   return pathname.replace(/\/+$/, "") || "/";
@@ -79,6 +81,17 @@ function appendHistoryOutcome(source: URLSearchParams, target: URLSearchParams):
   target.set("outcome", ordered.join(","));
 }
 
+function appendCompetitorRelationships(source: URLSearchParams, target: URLSearchParams): void {
+  const raw = source.get("relationship");
+  if (!raw || raw === "all") return;
+  const values = [...new Set(raw.split(",").filter(Boolean))];
+  if (!values.length || values.some((value) => !COMPETITOR_RELATIONSHIPS.includes(value as typeof COMPETITOR_RELATIONSHIPS[number]))) {
+    target.set("relationship", raw);
+    return;
+  }
+  target.set("relationship", COMPETITOR_RELATIONSHIPS.filter((value) => values.includes(value)).join(","));
+}
+
 function publicCacheUrl(requestUrl: URL): URL | null {
   const path = normalizedPath(requestUrl.pathname);
   const source = requestUrl.searchParams;
@@ -119,6 +132,16 @@ function publicCacheUrl(requestUrl: URL): URL | null {
     appendRaw(source, url.searchParams, "after");
     return url;
   }
+  if (path === "/api/v1/competitors") {
+    const defaults: Record<string,string> = {view:"direct",sort:"downloads",order:"desc",page:"1",limit:"50"};
+    for (const key of DIRECTORY_FILTERS) {
+      let value=source.get(key)?.trim();
+      if (value && ["page","limit","age_months"].includes(key) && /^\d+$/.test(value)) value=String(Number(value));
+      if (value && value!==defaults[key]) url.searchParams.set(key,value);
+    }
+    return url;
+  }
+  if (/^\/api\/v1\/competitors\/[a-z][a-z0-9_]*$/.test(path)) return url;
   if (path === "/api/v1/legacy" || /^\/api\/v1\/legacy\/[^/]+$/.test(path)) return url;
   if (/^\/api\/v1\/runs\/[^/]+$/.test(path)) return url;
   if (/^\/api\/v1\/runs\/[^/]+\/queries$/.test(path)) {
@@ -132,7 +155,11 @@ function publicCacheUrl(requestUrl: URL): URL | null {
     if (profile === "pulse" || profile === "full") url.searchParams.set("profile", profile);
     return url;
   }
-  if (/^\/api\/v1\/runs\/[^/]+\/(?:competitors|recommendations)$/.test(path)) return url;
+  if (/^\/api\/v1\/runs\/[^/]+\/competitors$/.test(path)) {
+    appendCompetitorRelationships(source, url.searchParams);
+    return url;
+  }
+  if (/^\/api\/v1\/runs\/[^/]+\/recommendations$/.test(path)) return url;
   if (/^\/api\/v1\/exports\/[^/]+\/(?:markdown|csv|json)$/.test(path)) return url;
   return null;
 }

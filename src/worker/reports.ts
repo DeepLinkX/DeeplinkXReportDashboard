@@ -1,5 +1,11 @@
 import { NOISE_TERMS, normalize, semanticText, sha256Hex } from "../shared/catalog.js";
 import type { RecommendationClass } from "../shared/types.js";
+import {
+  aggregateCompetitors,
+  ensureCompetitorClassifications,
+  upsertCompetitors,
+  type CompetitorRow,
+} from "./competitors.js";
 
 interface RunRow {
   id: string;
@@ -50,14 +56,6 @@ interface SnapshotRow {
   likes: number | null;
   downloads_30d: number | null;
   captured_at: string;
-}
-
-interface CompetitorRow {
-  package_name: string;
-  occurrence_count: number;
-  best_rank: number;
-  median_rank: number;
-  category: string;
 }
 
 interface RecommendationRow {
@@ -138,72 +136,16 @@ export function recommendation(
   };
 }
 
-function competitorCategory(productArea: string): string {
-  const categories: Record<string, string> = {
-    "maps-navigation": "map/navigation launcher",
-    "stores-fallbacks": "store redirect and fallback",
-    "app-launching": "external app launcher",
-    "features-comparisons": "features and alternatives",
-    category: "deep links",
-    app: "provider-specific app linking",
-    "provider-action": "provider action",
-    "sdk-filter": "Flutter SDK filter",
-    topic: "pub.dev topic",
-  };
-  return categories[productArea] ?? productArea;
-}
-
-async function aggregateCompetitors(env: Env, runId: string): Promise<CompetitorRow[]> {
-  const result = await env.DB.prepare(
-    `WITH ranked AS (
-      SELECT sp.package_name, sp.position, rq.product_area,
-        ROW_NUMBER() OVER (PARTITION BY sp.package_name ORDER BY sp.position) AS position_order,
-        COUNT(*) OVER (PARTITION BY sp.package_name) AS position_count
-      FROM search_positions sp
-      JOIN run_queries rq ON rq.run_id = sp.run_id AND rq.query_id = sp.query_id
-      WHERE sp.run_id = ? AND sp.package_name != ?
-    ), summaries AS (
-      SELECT package_name,
-        COUNT(*) AS occurrence_count,
-        MIN(position) AS best_rank,
-        AVG(CASE WHEN position_order IN ((position_count + 1) / 2, (position_count + 2) / 2) THEN position END) AS median_rank
-      FROM ranked
-      GROUP BY package_name
-    ), areas AS (
-      SELECT package_name, product_area,
-        ROW_NUMBER() OVER (PARTITION BY package_name ORDER BY COUNT(*) DESC, product_area) AS area_order
-      FROM ranked
-      GROUP BY package_name, product_area
-    )
-    SELECT summaries.package_name, summaries.occurrence_count, summaries.best_rank,
-      summaries.median_rank, areas.product_area AS category
-    FROM summaries
-    JOIN areas ON areas.package_name = summaries.package_name AND areas.area_order = 1
-    ORDER BY summaries.occurrence_count DESC, summaries.best_rank ASC, summaries.package_name ASC`,
-  ).bind(runId, env.PACKAGE_NAME).all<CompetitorRow>();
-  return result.results.map((row) => ({ ...row, category: competitorCategory(row.category) }));
-}
-
-async function replaceDerivedRows(
+async function replaceRecommendations(
   env: Env,
   runId: string,
-  competitors: CompetitorRow[],
   recommendations: RecommendationRow[],
 ): Promise<void> {
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM competitors WHERE run_id = ?").bind(runId),
-    env.DB.prepare("DELETE FROM recommendations WHERE run_id = ?").bind(runId),
-  ]);
-  const statements = [
-    ...competitors.map((row) => env.DB.prepare(
-      `INSERT INTO competitors (run_id, package_name, occurrence_count, best_rank, median_rank, category)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(runId, row.package_name, row.occurrence_count, row.best_rank, row.median_rank, row.category)),
-    ...recommendations.map((row) => env.DB.prepare(
-      `INSERT INTO recommendations (run_id, query_id, class, priority, rationale, evidence_json)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(runId, row.query_id, row.class, row.priority, row.rationale, row.evidence_json)),
-  ];
+  await env.DB.prepare("DELETE FROM recommendations WHERE run_id = ?").bind(runId).run();
+  const statements = recommendations.map((row) => env.DB.prepare(
+    `INSERT INTO recommendations (run_id, query_id, class, priority, rationale, evidence_json)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(runId, row.query_id, row.class, row.priority, row.rationale, row.evidence_json));
   for (let index = 0; index < statements.length; index += 75) await env.DB.batch(statements.slice(index, index + 75));
 }
 
@@ -396,8 +338,9 @@ export async function finalizeRun(env: Env, runId: string): Promise<void> {
     .map((query) => ({ query_id: query.query_id, ...recommendation(query, publishedText, repositoryText) }))
     .sort((left, right) => left.priority - right.priority || left.query_id.localeCompare(right.query_id));
   const competitors = await aggregateCompetitors(env, runId);
-  await replaceDerivedRows(env, runId, competitors, recommendations);
-
+  await upsertCompetitors(env, runId, competitors);
+  await replaceRecommendations(env, runId, recommendations);
+  if (run.profile === "full") await ensureCompetitorClassifications(env, runId);
   const base = `pubdev_keyword_visibility_${run.profile}_${run.report_date}`;
   await storeArtifact(env, runId, "markdown", `${base}.md`, "text/markdown; charset=utf-8", renderMarkdown(run, queries, snapshot, competitors, recommendations));
   await storeArtifact(env, runId, "csv", `${base}.csv`, "text/csv; charset=utf-8", reportCsv(queries));

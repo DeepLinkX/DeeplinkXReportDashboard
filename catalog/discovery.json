@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "maximum_queries": 200,
+  "depth": 100,
+  "seeds": ["whatsapp_unilink", "whatsapp_share", "appinio_social_share", "map_launcher", "store_redirect"],
+  "queries": [
+    "social share", "social sharing", "share files", "share images", "instagram story share",
+    "whatsapp business share", "telegram share", "external app launcher", "app availability",
+    "url builder", "universal link builder", "store review", "store redirect", "map launcher",
+    "spotify launch", "messenger share", "signal share", "viber share", "wechat share", "line share"
+  ],
+  "source": "https://pub.dev/packages/appinio_social_share",
+  "derivation": "Social-sharing seeds informed by the linked package, plus exploratory external-app, URL-builder, store, navigation and provider hypotheses. Search terms alone establish neither package capabilities nor DeeplinkX support; each discovered package requires its own evidence."
+}

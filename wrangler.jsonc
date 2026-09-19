@@ -66,7 +66,7 @@
     "PACKAGE_NAME": "deeplink_x",
     "CATALOG_URL": "https://raw.githubusercontent.com/DeepLinkX/DeeplinkXReportDashboard/main/catalog/catalog-v3.json",
     "PULSE_QUERY_LIMIT": "120",
-    "FULL_QUERY_LIMIT": "750",
+    "FULL_QUERY_LIMIT": "1500",
     "D1_CAPACITY_BYTES": "524288000",
     "RAW_RETENTION_DAYS": "90",
     "DIAGNOSTIC_RETENTION_DAYS": "30"

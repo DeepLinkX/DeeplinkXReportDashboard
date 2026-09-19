@@ -304,7 +304,7 @@ export async function enqueueFinalizerIfReady(env: Env, runId: string): Promise<
   }
 }
 
-export async function markDeadLetter(env: Env, message: AuditQueueMessage, detail: string): Promise<void> {
+export async function markDeadLetter(env: Env, message: Exclude<AuditQueueMessage, {kind:"intelligence"}>, detail: string): Promise<void> {
   const now = new Date().toISOString();
   if (message.kind === "scan-query") {
     await env.DB.prepare(

@@ -28,7 +28,7 @@ describe("schema-v3 catalog", () => {
 
   it("keeps both profiles bounded and sentence-free", async () => {
     const value = await catalog();
-    expect(value.selection.profile_counts).toEqual({ pulse: 82, full: 414 });
+    expect(value.selection.profile_counts).toEqual({ pulse: 82, full: 642 });
     expect(value.selection.profile_counts.pulse).toBeLessThanOrEqual(PROFILE_BUDGET.pulse);
     expect(value.selection.profile_counts.full).toBeLessThanOrEqual(PROFILE_BUDGET.full);
     for (const query of value.queries) {
@@ -43,7 +43,7 @@ describe("schema-v3 catalog", () => {
     const normalized = value.queries.map((query) => normalize(query.query));
     expect(new Set(normalized).size).toBe(value.queries.length);
     expect(value.queries.filter((query) => query.tags.provider === "Mapy.com" && query.product_area === "app")).toHaveLength(4);
-    for (const store of value.product.stores) expect(value.queries.filter((query) => query.tags.store === store)).toHaveLength(6);
+    for (const store of value.product.stores) expect(value.queries.filter((query) => query.tags.store === store && query.lane === "store")).toHaveLength(6);
     expect(value.queries.some((query) => query.lane === "navigation" && query.tags.capability === "coordinates")).toBe(true);
     expect(value.product.navigation_providers).not.toContain("Temu");
     expect(value.product.navigation_providers).not.toContain("Threads");
@@ -54,7 +54,7 @@ describe("schema-v3 catalog", () => {
 
   it("uses stable IDs and rejects catalog drift", async () => {
     const value = await catalog();
-    expect(value.catalog_version).toBe("clean-room-v1-09bc7091dc31fa02");
+    expect(value.catalog_version).toBe("clean-room-v1-4a1641c57fc4da1b");
     const deepLink = value.queries.find((query) => query.query === "deep link")!;
     expect(deepLink.query_id).toBe(await stableQueryId("  DEEP   LINK ", "raw"));
     expect(await catalogHash(value.queries)).toBe(value.catalog_version);

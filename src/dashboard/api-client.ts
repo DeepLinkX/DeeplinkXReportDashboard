@@ -55,6 +55,46 @@ export interface PackageSnapshot {
   report_date?: string;
 }
 
+export type CompetitorRelationship = "direct" | "adjacent" | "noise" | "unknown";
+
+export interface Competitor {
+  package_name: string;
+  occurrence_count: number;
+  best_rank: number;
+  median_rank: number;
+  category: string;
+  classification_status: string;
+  relationship: CompetitorRelationship;
+  capability_category: string;
+  classifier_version: string | null;
+  published_version: string | null;
+  published_description: string | null;
+  published_topics: string[];
+  metadata_captured_at: string | null;
+  rationale: string;
+  matched_terms: string[];
+  relevant_occurrence_count: number;
+  relevant_best_rank: number | null;
+  relevant_median_rank: number | null;
+}
+
+export interface CompetitorClassificationSummary {
+  status: "complete" | "partial" | "pending" | "not_started" | "unavailable";
+  classifier_version: string;
+  raw_competitor_count: number;
+  candidate_count: number;
+  complete_count: number;
+  failed_count: number;
+  pending_count: number;
+  relationship_counts: Record<CompetitorRelationship, number>;
+  reason?: string;
+}
+
+export interface CompetitorResponse {
+  competitors: Competitor[];
+  classification: CompetitorClassificationSummary;
+}
+
 export interface Summary {
   service: string;
   latest: { pulse: Run | null; full: Run | null };

@@ -1,4 +1,5 @@
 import type { AuditProfile } from "../shared/types.js";
+import { directoryResponse, packageResponse, startIntelligence, exportReview, importReview } from "./intelligence.js";
 import { canonicalizePackageSnapshots, compareQuerySets, type MovementQuery } from "../shared/movement.js";
 import { activateBundledCatalog, syncCatalog } from "./catalog-store.js";
 import type { LegacyImportPayload } from "../shared/types.js";
@@ -6,6 +7,12 @@ import { HistoryInputError, historyEvents, historySummary, validUtcDate } from "
 import { importLegacyDocument } from "./legacy-import.js";
 import { enforceRetention, retentionState } from "./retention.js";
 import { createRun, resumeFinalizers } from "./run-service.js";
+import {
+  PermanentCompetitorError,
+  competitorClassificationSummary,
+  reportedCompetitors,
+  startCompetitorBackfill,
+} from "./competitors.js";
 import {
   MUTABLE_CACHE_TAG,
   runCacheTag,
@@ -165,7 +172,7 @@ async function queryRows(env: Env, runId: string, url: URL): Promise<Response> {
     `SELECT query_id, query, lane, product_area, expression_type, product_fit, tags_json,
       sources_json, definition_hash, requested_depth, actual_depth, rank, pages_scanned,
       exhausted, status, retry_count, packages_json, error_code
-     FROM run_queries WHERE ${clauses.join(" AND ")} ORDER BY lane, query LIMIT 750`,
+     FROM run_queries WHERE ${clauses.join(" AND ")} ORDER BY lane, query LIMIT 1500`,
   ).bind(...bindings).all<Record<string, unknown>>();
   return json({ queries: result.results.map((row) => ({
     ...row,
@@ -178,17 +185,35 @@ async function queryRows(env: Env, runId: string, url: URL): Promise<Response> {
   })) });
 }
 
-async function tableRows(env: Env, table: "competitors" | "recommendations", runId: string): Promise<Response> {
+const COMPETITOR_RELATIONSHIPS = ["direct", "adjacent", "noise", "unknown"] as const;
+
+function selectedCompetitorRelationships(url: URL): Set<string> | null {
+  const raw = url.searchParams.get("relationship");
+  if (!raw || raw === "all") return null;
+  const values = [...new Set(raw.split(",").filter(Boolean))];
+  if (!values.length || values.some((value) => !COMPETITOR_RELATIONSHIPS.includes(value as typeof COMPETITOR_RELATIONSHIPS[number]))) {
+    throw new HistoryInputError("relationship must contain direct, adjacent, noise, unknown, or all.");
+  }
+  return new Set(values);
+}
+
+async function tableRows(env: Env, table: "competitors" | "recommendations", runId: string, url?: URL): Promise<Response> {
   if (table === "competitors") {
-    const rows = await env.DB.prepare(
-      "SELECT * FROM competitors WHERE run_id = ? ORDER BY occurrence_count DESC, best_rank, package_name LIMIT 500",
-    ).bind(runId).all();
-    return json({ competitors: rows.results });
+    const selected = selectedCompetitorRelationships(url!);
+    const [rows, classification] = await Promise.all([
+      reportedCompetitors(env, runId),
+      competitorClassificationSummary(env, runId),
+    ]);
+    const candidates = rows;
+    return json({
+      competitors: selected ? candidates.filter((row) => selected.has(row.relationship)) : candidates,
+      classification,
+    });
   }
   const rows = await env.DB.prepare(
     `SELECT rec.*, rq.query, rq.rank, rq.requested_depth
      FROM recommendations rec JOIN run_queries rq ON rq.run_id = rec.run_id AND rq.query_id = rec.query_id
-     WHERE rec.run_id = ? ORDER BY rec.priority, rq.query LIMIT 750`,
+     WHERE rec.run_id = ? ORDER BY rec.priority, rq.query LIMIT 1500`,
   ).bind(runId).all<Record<string, unknown>>();
   return json({ recommendations: rows.results.map((row) => ({ ...row, evidence: JSON.parse(String(row.evidence_json)), evidence_json: undefined })) });
 }
@@ -331,6 +356,7 @@ async function runScopedResponse(
   env: Env,
   runId: string,
   producer: () => Promise<Response>,
+  mutableDerived = false,
 ): Promise<Response> {
   const run = await env.DB.prepare(
     "SELECT status, report_materialized FROM runs WHERE id = ?",
@@ -344,6 +370,9 @@ async function runScopedResponse(
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   }
   const materialized = Boolean(run?.report_materialized);
+  if (mutableDerived) {
+    return withPublicCache(response, "mutable", [MUTABLE_CACHE_TAG, runCacheTag(runId)]);
+  }
   return withPublicCache(
     response,
     materialized ? "immutable" : "live",
@@ -362,6 +391,27 @@ async function admin(
   if (!await authorize(request, env)) return errorResponse(401, "Unauthorized.");
   const idempotencyKey = request.headers.get("idempotency-key")?.trim();
   if (!idempotencyKey || idempotencyKey.length > 200) return errorResponse(400, "A bounded Idempotency-Key header is required.");
+  if (path === "/api/v1/admin/competitors/refresh" && request.method === "POST") {
+    const body = await bodyJson<{run_id?:string; full?:boolean}>(request);
+    if (body.run_id && !await env.DB.prepare("SELECT id FROM runs WHERE id=?").bind(body.run_id).first()) return errorResponse(400,"Unknown run.");
+    const result = await startIntelligence(env, `manual:${idempotencyKey}`, body.run_id, body.full ?? true);
+    await invalidate([MUTABLE_CACHE_TAG]);
+    return json(result,{status:202,headers:{"cache-control":"no-store"}});
+  }
+  if (path === "/api/v1/admin/competitors/review/export" && request.method === "POST") {
+    try {
+      const body=await bodyJson<{packages:string[]}>(request);
+      if (!Array.isArray(body.packages)) return errorResponse(400,"packages must be an array.");
+      return json(await exportReview(env,body.packages),{headers:{"cache-control":"no-store"}});
+    } catch (error) {return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
+  }
+  if (path === "/api/v1/admin/competitors/review/import" && request.method === "POST") {
+    try {
+      await importReview(env,await bodyJson<Parameters<typeof importReview>[1]>(request));
+      await invalidate([MUTABLE_CACHE_TAG]);
+      return json({status:"reviewed"},{headers:{"cache-control":"no-store"}});
+    } catch (error) {return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
+  }
   if (path === "/api/v1/admin/runs" && request.method === "POST") {
     const body = await bodyJson<{ profile?: AuditProfile }>(request);
     if (body.profile !== "pulse" && body.profile !== "full") return errorResponse(400, "Profile must be pulse or full.");
@@ -393,6 +443,18 @@ async function admin(
     );
     return json(result, { status: result.status === "already-imported" ? 200 : 201, headers: { "cache-control": "no-store" } });
   }
+  if (path === "/api/v1/admin/competitors/backfill" && request.method === "POST") {
+    const body = await bodyJson<{ run_id?: string }>(request);
+    if (body.run_id !== undefined && (!body.run_id.trim() || body.run_id.length > 200)) {
+      return errorResponse(400, "run_id must be a bounded non-empty string when provided.");
+    }
+    const result = await startCompetitorBackfill(env, idempotencyKey, body.run_id?.trim());
+    await Promise.all(result.started_runs.map((runId) => invalidate([MUTABLE_CACHE_TAG, runCacheTag(runId)], runId)));
+    return json(result, {
+      status: result.already_started ? 200 : 202,
+      headers: { "cache-control": "no-store" },
+    });
+  }
   return errorResponse(404, "Admin endpoint not found.");
 }
 
@@ -401,6 +463,15 @@ export async function handlePublicApi(request: Request, env: Env): Promise<Respo
   const path = url.pathname.replace(/\/+$/, "") || "/";
   try {
     if (request.method !== "GET") return errorResponse(405, "Method not allowed.");
+    if (path === "/api/v1/competitors") {
+      try { return withPublicCache(json(await directoryResponse(env,url)),"mutable",[MUTABLE_CACHE_TAG]); }
+      catch (error) { return errorResponse(400,error instanceof Error?error.message:"Invalid filters."); }
+    }
+    const packageMatch=path.match(/^\/api\/v1\/competitors\/([a-z][a-z0-9_]*)$/);
+    if (packageMatch) {
+      const result=await packageResponse(env,packageMatch[1]);
+      return result ? withPublicCache(json(result),"mutable",[MUTABLE_CACHE_TAG]) : errorResponse(404,"Package not found.");
+    }
     if (path === "/api/v1/summary") return withPublicCache(await summary(env), "live", [MUTABLE_CACHE_TAG]);
     if (path === "/api/v1/runs") return withPublicCache(await runs(env, url), "live", [MUTABLE_CACHE_TAG]);
     if (path === "/api/v1/stats") return withPublicCache(await packageStats(env, url), "mutable", [MUTABLE_CACHE_TAG]);
@@ -424,7 +495,12 @@ export async function handlePublicApi(request: Request, env: Env): Promise<Respo
     }
     const competitorMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/competitors$/);
     if (competitorMatch) {
-      return runScopedResponse(env, competitorMatch[1], () => tableRows(env, "competitors", competitorMatch[1]));
+      return await runScopedResponse(
+        env,
+        competitorMatch[1],
+        () => tableRows(env, "competitors", competitorMatch[1], url),
+        true,
+      );
     }
     const recommendationMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/recommendations$/);
     if (recommendationMatch) {
@@ -457,6 +533,9 @@ export async function handleUncachedApi(
     }
     return errorResponse(404, "API endpoint not found.");
   } catch (error) {
+    if (error instanceof PermanentCompetitorError) {
+      return errorResponse(error.code === "backfill-idempotency-conflict" ? 409 : 400, error.message);
+    }
     return errorResponse(500, error instanceof Error ? error.message : "Unexpected service error.");
   }
 }

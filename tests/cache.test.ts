@@ -32,6 +32,10 @@ describe("public API cache keys", () => {
     expect(otherProvider?.url).not.toBe(map?.url);
     expect(canonical("/api/v1/history/events?cursor=abc&limit=250&outcome=all")?.url)
       .toBe("https://visibility.example/api/v1/history/events?outcome=all&limit=250&cursor=abc");
+    expect(canonical("/api/v1/runs/run-1/competitors?relationship=unknown,direct,direct")?.url)
+      .toBe("https://visibility.example/api/v1/runs/run-1/competitors?relationship=direct%2Cunknown");
+    expect(canonical("/api/v1/runs/run-1/competitors?relationship=all")?.url)
+      .toBe("https://visibility.example/api/v1/runs/run-1/competitors");
   });
 
   it("strips caller credentials and excludes private, health, and non-GET routes", () => {

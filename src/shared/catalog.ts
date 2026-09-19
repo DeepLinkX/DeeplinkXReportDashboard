@@ -10,7 +10,7 @@ export const SCHEMA_VERSION = 3 as const;
 export const CATALOG_REVISION = "clean-room-v1";
 export const PACKAGE_NAME = "deeplink_x";
 export const PROFILE_DEPTH = { pulse: 10, full: 100 } as const;
-export const PROFILE_BUDGET = { pulse: 120, full: 750 } as const;
+export const PROFILE_BUDGET = { pulse: 120, full: 1500 } as const;
 export const HERO_APPS = [
   "WhatsApp",
   "Telegram",
@@ -190,6 +190,11 @@ export async function validateCatalog(manifest: unknown): Promise<CatalogManifes
   const fullCount = candidate.queries.filter((query) => query.profiles.includes("full")).length;
   if (pulseCount > PROFILE_BUDGET.pulse || fullCount > PROFILE_BUDGET.full) {
     throw new Error(`Catalog exceeds Free-tier budgets (${pulseCount} pulse, ${fullCount} full).`);
+  }
+  for (const capability of candidate.capabilities ?? []) {
+    if (!capability.query_ids.length || capability.query_ids.some((id) => !ids.has(id))) {
+      throw new Error(`Uncovered public action: ${capability.api}`);
+    }
   }
   return candidate as CatalogManifest;
 }

@@ -15,6 +15,7 @@ import {
   validateCatalog,
 } from "../src/shared/catalog.js";
 import type { CatalogManifest, QueryDefinition } from "../src/shared/types.js";
+import { inventoryForDoc, validateProviderCoverage } from "./capability-inventory.js";
 
 interface ProductDoc {
   name: string;
@@ -100,7 +101,7 @@ export async function validateSourceRepository(input: string): Promise<string> {
 
   const dirtyEvidence = execFileSync(
     "git",
-    ["status", "--porcelain", "--untracked-files=all", "--", "pubspec.yaml", "README.md", "doc/apps"],
+    ["status", "--porcelain", "--untracked-files=all", "--", "pubspec.yaml", "README.md", "doc/apps", "lib/src/apps"],
     { cwd: repositoryRoot, encoding: "utf8" },
   ).trim();
   if (dirtyEvidence) {
@@ -139,12 +140,18 @@ async function readDocs(repositoryRoot: string): Promise<ProductDoc[]> {
   const files = await markdownFiles(docsRoot);
   return Promise.all(files.map(async (filename) => {
     const text = await fs.readFile(filename, "utf8");
+    let section = "";
+    const headings: string[] = [];
+    for (const line of text.split("\n")) {
+      if (line.startsWith("## ")) section = line.slice(3).trim().toLowerCase();
+      if (line.startsWith("### ") && ["available actions", "usage", "basic usage"].includes(section)) {
+        headings.push(line.slice(4).replace(/\s+Action$/i, "").trim());
+      }
+    }
     return {
       name: docTitle(text, filename),
       location: path.relative(repositoryRoot, filename),
-      headings: [...text.matchAll(/^###\s+(.+?)\s*$/gm)]
-        .map((match) => match[1].replace(/\s+Action$/i, "").trim())
-        .filter((heading) => !/^(?:iOS|Android|Web|Native|Store|Fallback)/i.test(heading)),
+      headings,
       isStore: path.relative(docsRoot, filename).split(path.sep).includes("stores"),
     };
   }));
@@ -261,6 +268,22 @@ export async function generateCatalog(sourceRepo: string): Promise<CatalogManife
     }
   }
 
+  const capabilities = (await Promise.all(docs.map((doc) => inventoryForDoc(repositoryRoot, doc)))).flat();
+  await validateProviderCoverage(repositoryRoot, capabilities);
+  for (const capability of capabilities) {
+    for (const phrase of capability.phrases) {
+      const query = `${capability.provider} ${phrase}`;
+      // Existing query meaning/provenance remains stable when an API action
+      // shares its search text. The inventory carries the additional mapping.
+      if (!queries.has(normalize(query))) await addQuery(queries, {
+        query, lane: "action", productArea: capability.kind === "store" ? "stores-fallbacks" : "provider-action",
+        expressionType: "raw", profiles: ["full"],
+        source: { type: "repo", location: capability.source, derivation: `Public action: ${capability.api}` },
+        tags: { [capability.kind === "store" ? "store" : "provider"]: capability.provider, action: capability.action },
+      });
+      capability.query_ids.push(queries.get(normalize(query))!.query_id);
+    }
+  }
   const catalogQueries = [...queries.values()].sort((left, right) => left.lane.localeCompare(right.lane) || normalize(left.query).localeCompare(normalize(right.query)));
   const catalogVersion = await catalogHash(catalogQueries);
   for (const query of catalogQueries) query.catalog_version = catalogVersion;
@@ -274,6 +297,7 @@ export async function generateCatalog(sourceRepo: string): Promise<CatalogManife
     generated_at: new Date().toISOString(),
     source_commit: sourceCommit,
     source_url: `https://github.com/DeepLinkX/DeeplinkX/tree/${sourceCommit}`,
+    capabilities,
     product: {
       repository_version: parseScalar(pubspecText, "version"),
       repository_description: parseScalar(pubspecText, "description"),

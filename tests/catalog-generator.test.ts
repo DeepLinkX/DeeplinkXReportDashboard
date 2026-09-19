@@ -31,12 +31,16 @@ async function productFixture(): Promise<string> {
   await fs.writeFile(path.join(root, "README.md"), "# DeeplinkX\n");
   await fs.writeFile(
     path.join(root, "doc", "apps", "google_maps.md"),
-    "# Google Maps Deeplinks\n\n### View Map Action\n\n### Directions With Coordinates Action\n",
+    "# Google Maps Deeplinks\n\n## Available Actions\n\n### View Map Action\n\n### Directions With Coordinates Action\n",
   );
   await fs.writeFile(
     path.join(root, "doc", "apps", "stores", "play_store.md"),
-    "# Play Store Deeplinks\n\n### Open App Page Action\n",
+    "# Play Store Deeplinks\n\n## Available Actions\n\n### Open App Page Action\n",
   );
+  await fs.mkdir(path.join(root,"lib/src/apps/downloadable_apps"),{recursive:true});
+  await fs.mkdir(path.join(root,"lib/src/apps/app_stores"),{recursive:true});
+  await fs.writeFile(path.join(root,"lib/src/apps/downloadable_apps/google_maps.dart"),"class GoogleMaps extends App {\n factory GoogleMaps.open() => GoogleMaps();\n static ViewAction view() => ViewAction();\n static DirectionsAction directionsWithCoords() => DirectionsAction();\n}");
+  await fs.writeFile(path.join(root,"lib/src/apps/app_stores/play_store.dart"),"class PlayStore implements StoreApp {\n factory PlayStore.open() => PlayStore();\n static PageAction openAppPage() => PageAction();\n}");
   execFileSync("git", ["init", "-b", "main"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Catalog Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "catalog-test@example.invalid"], { cwd: root });
@@ -87,5 +91,16 @@ describe("standalone catalog generation", () => {
     expect(first.source_url).toBe(`https://github.com/DeepLinkX/DeeplinkX/tree/${commit}`);
     expect(first.queries.find((query) => query.lane === "compact-core")?.sources[0].location)
       .toBe(STABLE_FIXED_CATALOG_SOURCE);
+  });
+
+  it("rejects an undocumented provider and an unmapped public action", async () => {
+    const root = await productFixture();
+    const source = "lib/src/apps/downloadable_apps/new_provider.dart";
+    await fs.writeFile(path.join(root,source),"class NewProvider extends App {\n static Action unknownAction() => Action();\n}");
+    execFileSync("git",["add","."],{cwd:root});execFileSync("git",["commit","-m","new provider"],{cwd:root});
+    await expect(generateCatalog(root)).rejects.toThrow(/no documentation\/action coverage/);
+    await fs.writeFile(path.join(root,"doc/apps/new_provider.md"),"# New Provider Deeplinks\n");
+    execFileSync("git",["add","."],{cwd:root});execFileSync("git",["commit","-m","new docs"],{cwd:root});
+    await expect(generateCatalog(root)).rejects.toThrow(/Unmapped public action NewProvider.unknownAction/);
   });
 });

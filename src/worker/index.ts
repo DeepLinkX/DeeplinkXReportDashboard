@@ -11,7 +11,17 @@ import { syncCatalog } from "./catalog-store.js";
 import { finalizeRun } from "./reports.js";
 import { recordDiagnostic } from "./retention.js";
 import { createRun, markDeadLetter } from "./run-service.js";
-import { RetryableScanError, recordRetry, scanQuery } from "./scanner.js";
+import { RetryableScanError, recordRetry, scanQuery, retryDelay } from "./scanner.js";
+import { startIntelligence, processIntelligenceJob, failIntelligenceJob } from "./intelligence.js";
+import {
+  PermanentCompetitorError,
+  RetryableCompetitorError,
+  completeCompetitorEnrichment,
+  enrichCompetitor,
+  markCompetitorFailed,
+  recordCompetitorRetry,
+  dispatchCompetitorClassifications,
+} from "./competitors.js";
 
 export class PublicAPI extends WorkerEntrypoint<Env> {
   async fetch(request: Request): Promise<Response> {
@@ -57,9 +67,29 @@ async function handleQueueMessage(
   env: Env,
   context: ExecutionContext,
 ): Promise<void> {
+  if (message.body.kind === "intelligence") {
+    try {
+      await processIntelligenceJob(env, message.body.jobId, message.attempts);
+      await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);
+      message.ack();
+    } catch (error) {
+      const permanent = error instanceof PermanentCompetitorError;
+      await failIntelligenceJob(env, message.body.jobId, error, permanent);
+      if (permanent) message.ack();
+      else message.retry({ delaySeconds: error instanceof RetryableCompetitorError ? error.delaySeconds : retryDelay(null, message.attempts) });
+    }
+    return;
+  }
+  if (message.body.kind === "classify-competitors") {
+    await dispatchCompetitorClassifications(env, message.body.runId);
+    message.ack();
+    return;
+  }
   if (message.body.kind === "finalize-run") {
     try {
       await finalizeRun(env, message.body.runId);
+      const completed = await env.DB.prepare("SELECT profile,status FROM runs WHERE id=?").bind(message.body.runId).first<{profile:string;status:string}>();
+      if (completed?.status === "complete") await startIntelligence(env, `run:${message.body.runId}`, message.body.runId, completed.profile === "full");
       await invalidatePublicCache(
         context,
         env,
@@ -75,6 +105,46 @@ async function handleQueueMessage(
         detail: error instanceof Error ? error.message : String(error),
       });
       message.retry({ delaySeconds: Math.min(3_600, 10 * 2 ** Math.min(message.attempts, 9)) });
+    }
+    return;
+  }
+  if (message.body.kind === "enrich-competitor") {
+    try {
+      await enrichCompetitor(env, message.body.runId, message.body.packageName, message.attempts);
+      const completion = await completeCompetitorEnrichment(env, message.body.runId);
+      if (completion.ready && completion.materialized) {
+        await invalidatePublicCache(
+          context,
+          env,
+          [MUTABLE_CACHE_TAG, runCacheTag(message.body.runId)],
+          message.body.runId,
+        );
+      }
+      message.ack();
+    } catch (error) {
+      if (error instanceof PermanentCompetitorError) {
+        await markCompetitorFailed(env, message.body.runId, message.body.packageName, error);
+        const completion = await completeCompetitorEnrichment(env, message.body.runId);
+        if (completion.ready && completion.materialized) {
+          await invalidatePublicCache(
+            context,
+            env,
+            [MUTABLE_CACHE_TAG, runCacheTag(message.body.runId)],
+            message.body.runId,
+          );
+        }
+        message.ack();
+        return;
+      }
+      const retryable = error instanceof RetryableCompetitorError
+        ? error
+        : new RetryableCompetitorError(
+          error instanceof Error ? error.message : String(error),
+          Math.min(3_600, 10 * 2 ** Math.min(message.attempts, 9)),
+          "competitor-enrichment-error",
+        );
+      await recordCompetitorRetry(env, message.body.runId, message.body.packageName, retryable);
+      message.retry({ delaySeconds: retryable.delaySeconds });
     }
     return;
   }
@@ -127,7 +197,27 @@ export default {
     for (const message of batch.messages) {
       if (batch.queue === "deeplinkx-visibility-dlq") {
         try {
-          await markDeadLetter(env, message.body, `Exhausted Queue retries after ${message.attempts} attempts.`);
+          const detail = `Exhausted Queue retries after ${message.attempts} attempts.`;
+          if (message.body.kind === "intelligence") {
+            await failIntelligenceJob(env, message.body.jobId, detail, true);
+            await invalidatePublicCache(context, env, [MUTABLE_CACHE_TAG]);
+            message.ack();
+            continue;
+          }
+          if (message.body.kind === "classify-competitors") {
+            await recordDiagnostic(env, {runId:message.body.runId,severity:"error",code:"classification-dispatch-failed",detail});
+            message.ack();
+            continue;
+          }
+          if (message.body.kind === "enrich-competitor") {
+            await markCompetitorFailed(env, message.body.runId, message.body.packageName, {
+              code: "competitor-dead-letter",
+              message: detail,
+            });
+            await completeCompetitorEnrichment(env, message.body.runId);
+          } else {
+            await markDeadLetter(env, message.body, detail);
+          }
           await invalidatePublicCache(
             context,
             env,

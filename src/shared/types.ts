@@ -1,6 +1,7 @@
 export type AuditProfile = "pulse" | "full" | "legacy-mixed";
 export type ExpressionType = "raw" | "sdk-filter" | "topic-filter";
 export type ProductFit = "high" | "medium" | "low";
+export type CompetitorRelationship = "direct" | "adjacent" | "noise" | "unknown";
 export type RecommendationClass =
   | "protect"
   | "metadata gap"
@@ -28,6 +29,7 @@ export interface QueryDefinition {
 }
 
 export interface CatalogManifest {
+  capabilities?: import("./intelligence.js").ProductCapability[];
   schema_version: 3;
   catalog_revision: string;
   catalog_version: string;
@@ -74,7 +76,17 @@ export interface FinalizeRunMessage {
   runId: string;
 }
 
-export type AuditQueueMessage = ScanQueryMessage | FinalizeRunMessage;
+export interface EnrichCompetitorMessage {
+  kind: "enrich-competitor";
+  runId: string;
+  packageName: string;
+}
+
+export interface IntelligenceMessage {
+  kind: "intelligence";
+  jobId: string;
+}
+export type AuditQueueMessage = ScanQueryMessage | FinalizeRunMessage | EnrichCompetitorMessage | IntelligenceMessage | { kind: "classify-competitors"; runId: string };
 
 export interface SearchPackage {
   package: string;

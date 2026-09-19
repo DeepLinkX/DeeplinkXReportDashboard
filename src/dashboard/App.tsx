@@ -1,3 +1,4 @@
+import { CompetitorDirectory } from "./CompetitorDirectory.js";
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Route, Routes, useParams, useSearchParams } from "react-router-dom";
 import type { MovementOutcome, QueryMovement } from "../shared/movement.js";
@@ -7,6 +8,9 @@ import {
   number,
   rankText,
   useApi,
+  type Competitor,
+  type CompetitorClassificationSummary,
+  type CompetitorResponse,
   type HistoryEventsPage,
   type HistorySummary,
   type PackageSnapshot,
@@ -289,10 +293,41 @@ function Matrices() {
   return <section className="page-section"><header className="page-heading"><p className="eyebrow">Coverage matrices</p><h1>Provider and capability visibility.</h1><p>The full profile keeps app, store, and documented navigation terms separate.</p></header><div className="segmented" role="group" aria-label="Matrix type">{(["provider", "store", "navigation"] as const).map((item) => <button key={item} type="button" aria-pressed={view === item} onClick={() => setView(item)}>{item}</button>)}</div><Status loading={state.loading || queries.loading} error={state.error ?? queries.error}>{run ? <div className="matrix-grid">{rows.map((row) => <article className="panel matrix-card" key={row.name}><div><h2>{row.name}</h2><span>{row.ranks.length}/{row.items.length} visible</span></div><strong>{row.ranks.length ? `#${Math.min(...row.ranks)}` : "—"}<small>best rank</small></strong><ul>{row.items.slice(0, 6).map((item) => <li key={item.query_id}><span>{item.query}</span><b>{item.rank ? `#${item.rank}` : "—"}</b></li>)}</ul></article>)}</div> : <Empty title="No full report yet">Matrices populate after the first top-100 audit.</Empty>}</Status></section>;
 }
 
-function Competitors() {
-  const { run, state } = latestReport("full");
-  const competitors = useApi<{ competitors: Array<{ package_name: string; occurrence_count: number; best_rank: number; median_rank: number; category: string }> }>(run ? `/api/v1/runs/${run.id}/competitors` : null);
-  return <section className="page-section"><header className="page-heading"><p className="eyebrow">Competitor analysis</p><h1>Repeated packages across the catalog.</h1><p>Frequency is appearance across bounded queries—not market share, popularity, or demand.</p></header><Status loading={state.loading || competitors.loading} error={state.error ?? competitors.error}>{run ? <div className="table-wrap"><table><thead><tr><th>Package</th><th>Query appearances</th><th>Best</th><th>Median</th><th>Relevant category</th></tr></thead><tbody>{competitors.data?.competitors.map((item) => <tr key={item.package_name}><td><a href={`https://pub.dev/packages/${item.package_name}`}>{item.package_name} ↗</a></td><td>{item.occurrence_count}</td><td>#{item.best_rank}</td><td>{item.median_rank}</td><td><span className="tag">{item.category}</span></td></tr>)}</tbody></table></div> : <Empty title="No full report yet">Competitor aggregates are materialized with the first full audit.</Empty>}</Status></section>;
+function Competitors() { return <CompetitorDirectory />; }
+
+function sortedCompetitors(items: Competitor[]): Competitor[] {
+  return [...items].sort((left, right) => right.relevant_occurrence_count - left.relevant_occurrence_count
+    || (left.relevant_best_rank ?? Number.MAX_SAFE_INTEGER) - (right.relevant_best_rank ?? Number.MAX_SAFE_INTEGER)
+    || right.occurrence_count - left.occurrence_count
+    || left.package_name.localeCompare(right.package_name));
+}
+
+function CompetitorTable({ items, empty }: { items: Competitor[]; empty: string }) {
+  if (!items.length) return <Empty title="No packages in this group">{empty}</Empty>;
+  return <div className="table-wrap"><table><thead><tr><th>Package</th><th>Capability</th><th>Relevant appearances</th><th>Relevant best</th><th>Relevant median</th><th>Raw appearances</th></tr></thead><tbody>{sortedCompetitors(items).map((item) => <tr key={item.package_name}><td><a href={`https://pub.dev/packages/${item.package_name}`}>{item.package_name} ↗</a><small className="competitor-rationale">{item.rationale}</small></td><td><span className={`tag relationship-${item.relationship}`}>{item.capability_category}</span></td><td>{item.relevant_occurrence_count}</td><td>{item.relevant_best_rank === null ? "—" : `#${item.relevant_best_rank}`}</td><td>{item.relevant_median_rank ?? "—"}</td><td>{item.occurrence_count}</td></tr>)}</tbody></table></div>;
+}
+
+export function CompetitorSections({
+  competitors,
+  classification,
+}: {
+  competitors: Competitor[];
+  classification: CompetitorClassificationSummary;
+}) {
+  if (classification.status === "unavailable") {
+    return <Empty title="Historical competitor evidence unavailable">{classification.reason ?? "This report has no preserved package positions."}</Empty>;
+  }
+  const direct = competitors.filter((item) => item.relationship === "direct");
+  const adjacent = competitors.filter((item) => item.relationship === "adjacent");
+  const excluded = competitors.filter((item) => item.relationship === "noise" || item.relationship === "unknown");
+  const showWarning = classification.status !== "complete";
+  return <div className="competitor-groups">
+    {showWarning && <div className="warning-banner" role="status"><strong>Classification {classification.status.replace("_", " ")}</strong><span>{classification.reason}</span></div>}
+    <div className="competitor-summary" aria-label="Competitor classification summary"><article><span>Direct</span><strong>{classification.relationship_counts.direct}</strong></article><article><span>Adjacent</span><strong>{classification.relationship_counts.adjacent}</strong></article><article><span>Noise</span><strong>{classification.relationship_counts.noise}</strong></article><article><span>Unknown</span><strong>{classification.relationship_counts.unknown}</strong></article></div>
+    <section className="competitor-group"><div className="section-heading"><div><p className="kicker">Direct competitors</p><h2>Substantial outbound-launch overlap</h2></div><span>{direct.length} packages</span></div><CompetitorTable items={direct} empty="No package metadata currently establishes direct DeeplinkX overlap." /></section>
+    <section className="competitor-group"><div className="section-heading"><div><p className="kicker">Adjacent ecosystem</p><h2>Related link and availability tools</h2></div><span>{adjacent.length} packages</span></div><CompetitorTable items={adjacent} empty="No adjacent packages were classified in this report." /></section>
+    <details className="excluded-runs competitor-noise"><summary>Search noise and unknown packages ({excluded.length})</summary><p>These raw pub.dev matches are retained for auditability but excluded from the default competitor view.</p><CompetitorTable items={excluded} empty="No search noise was classified." /></details>
+  </div>;
 }
 
 function Reports() {
