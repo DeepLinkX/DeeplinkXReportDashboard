@@ -1,7 +1,9 @@
+import { packageNames, policyPreview, processingCounters, syncEvidence } from "./evidence-sync.js";
+import { reopenReview } from "./review-policy.js";
 import { admitStartup, startupMessage, startupStatus, StartupQueueUnavailable } from "./startup.js";
 import type { AuditProfile } from "../shared/types.js";
 import { isD1DailyQuotaError, quotaResetDelay } from "./quota.js";
-import { directoryResponse, packageResponse, exportReview, importReview } from "./intelligence.js";
+import { directoryResponse, packageResponse, exportReview, importReview, startPackageRefresh } from "./intelligence.js";
 import { canonicalizePackageSnapshots, compareQuerySets, type MovementQuery } from "../shared/movement.js";
 import { activateBundledCatalog, syncCatalog } from "./catalog-store.js";
 import type { LegacyImportPayload } from "../shared/types.js";
@@ -392,6 +394,31 @@ async function admin(
   if (!await authorize(request, env)) return errorResponse(401, "Unauthorized.");
   const idempotencyKey = request.headers.get("idempotency-key")?.trim();
   if (!idempotencyKey || idempotencyKey.length > 200) return errorResponse(400, "A bounded Idempotency-Key header is required.");
+  if (request.method === "POST" && ["/api/v1/admin/competitors/policy/preview","/api/v1/admin/competitors/policy/reopen","/api/v1/admin/competitors/evidence/sync","/api/v1/admin/competitors/processing"].includes(path)) {
+    try {
+      let result: unknown;
+      if (path.endsWith("/processing")) result = await processingCounters(env);
+      else if (path.endsWith("/evidence/sync")) result = await syncEvidence(env,await bodyJson<Parameters<typeof syncEvidence>[1]>(request));
+      else {
+        const body = await bodyJson<{packages: string[]; reason?: string}>(request);
+        const names = packageNames(body.packages);
+        if (path.endsWith("/reopen")) {
+          if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 1000) return errorResponse(400,"A bounded reopen reason is required.");
+          result = await reopenReview(env,names,body.reason.trim());
+        } else result = await policyPreview(env,names);
+      }
+      if (path.endsWith("/sync") || path.endsWith("/reopen")) await invalidate([MUTABLE_CACHE_TAG]);
+      return json(result,{headers:{"cache-control":"no-store"}});
+    } catch (error) {if(isD1DailyQuotaError(error)) throw error;return errorResponse(400,error instanceof Error?error.message:"Invalid policy request.");}
+  }
+  if (path === "/api/v1/admin/competitors/refresh/packages" && request.method === "POST") {
+    try {
+      const body = await bodyJson<{packages:string[]}>(request);
+      const result = await startPackageRefresh(env,idempotencyKey,packageNames(body.packages));
+      await invalidate([MUTABLE_CACHE_TAG]);
+      return json(result,{headers:{"cache-control":"no-store"}});
+    } catch (error) { if(isD1DailyQuotaError(error)) throw error; return errorResponse(400,error instanceof Error?error.message:"Invalid package refresh."); }
+  }
   if (path === "/api/v1/admin/competitors/refresh" && request.method === "POST") {
     const body = await bodyJson<{run_id?:string; full?:boolean}>(request);
     if ((body.run_id !== undefined && (typeof body.run_id !== "string" || !body.run_id.trim() || body.run_id.length > 200)) || (body.full !== undefined && typeof body.full !== "boolean")) return errorResponse(400,"Invalid refresh scope.");

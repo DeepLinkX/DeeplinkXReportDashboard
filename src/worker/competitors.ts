@@ -2,6 +2,7 @@ import bundledCatalog from "../../catalog/catalog-v3.json";
 import { analyzePackage, ANALYSIS_VERSION } from "../shared/competitor-analysis.js";
 import type { ProductCapability } from "../shared/intelligence.js";
 import { refreshPackage } from "./intelligence.js";
+import { unchangedNoiseSql } from "./review-policy.js";
 import type { CapabilityMatch, IntelligencePackage } from "../shared/intelligence.js";
 import { semanticText } from "../shared/catalog.js";
 import type { CompetitorRelationship } from "../shared/types.js";
@@ -365,12 +366,14 @@ export async function ensureCompetitorClassifications(
     ON CONFLICT(run_id,package_name) DO UPDATE SET status='planned',classifier_version=excluded.classifier_version
     WHERE competitor_classifications.classifier_version!=excluded.classifier_version`)
     .bind(COMPETITOR_CLASSIFIER_VERSION,now,runId).run();
+  await materializeNoiseClassifications(env,runId);
   const state=await classificationState(env,runId);
   if (state.planned) await env.SCAN_QUEUE.send({kind:"classify-competitors",runId});
   return {candidateCount:state.total,pendingCount:state.planned+state.queued+state.running,failedCount:state.failed,enqueuedCount:state.planned};
 }
 
 export async function dispatchCompetitorClassifications(env: Env, runId: string): Promise<void> {
+  await materializeNoiseClassifications(env,runId);
   const planned=await env.DB.prepare(`SELECT cc.package_name FROM competitor_classifications cc
     JOIN competitors c ON c.run_id=cc.run_id AND c.package_name=cc.package_name
     WHERE cc.run_id=? AND cc.status='planned' ORDER BY c.best_rank,c.occurrence_count DESC,cc.package_name LIMIT 100`)
@@ -380,6 +383,21 @@ export async function dispatchCompetitorClassifications(env: Env, runId: string)
   await env.DB.prepare("UPDATE competitor_classifications SET status='queued' WHERE run_id=? AND status='planned' AND package_name IN (SELECT value FROM json_each(?))")
     .bind(runId,JSON.stringify(planned.results.map((r)=>r.package_name))).run();
   if (planned.results.length===100) await env.SCAN_QUEUE.send({kind:"classify-competitors",runId});
+}
+
+/** Retain every discovered candidate in per-run totals without enqueuing noise enrichment. */
+async function materializeNoiseClassifications(env: Env, runId: string): Promise<void> {
+  await env.DB.prepare(`UPDATE competitor_classifications AS cc SET status='complete',relationship='noise',
+    capability_category=(SELECT json_extract(rp.decision_json,'$.capability_category') FROM competitor_review_policies rp WHERE rp.package_name=cc.package_name),
+    rationale=(SELECT json_extract(rp.decision_json,'$.rationale') FROM competitor_review_policies rp WHERE rp.package_name=cc.package_name),
+    published_version=(SELECT json_extract(cr.metadata_json,'$.version') FROM competitor_registry cr WHERE cr.package_name=cc.package_name),
+    published_description=(SELECT json_extract(cr.metadata_json,'$.description') FROM competitor_registry cr WHERE cr.package_name=cc.package_name),
+    published_topics_json=(SELECT json_extract(cr.metadata_json,'$.topics') FROM competitor_registry cr WHERE cr.package_name=cc.package_name),
+    metadata_captured_at=(SELECT cr.metadata_captured_at FROM competitor_registry cr WHERE cr.package_name=cc.package_name),
+    matched_terms_json='[]',relevant_occurrence_count=0,relevant_best_rank=NULL,relevant_median_rank=NULL,
+    error_code=NULL,error_message=NULL,classifier_version=?,updated_at=?
+    WHERE cc.run_id=? AND cc.status!='complete' AND EXISTS(SELECT 1 FROM competitor_registry cr WHERE cr.package_name=cc.package_name AND ${unchangedNoiseSql()})`)
+    .bind(COMPETITOR_CLASSIFIER_VERSION,new Date().toISOString(),runId).run();
 }
 
 async function queryEvidence(env: Env, runId: string, packageName: string): Promise<CompetitorQueryEvidence[]> {
@@ -434,7 +452,7 @@ async function persistPackageClassification(env: Env, runId: string, enriched: I
   await env.DB.prepare(
     `UPDATE competitor_classifications SET
       status = 'complete', relationship = ?, capability_category = ?, classifier_version = ?,
-      published_version = ?, published_description = ?, published_topics_json = ?, metadata_captured_at = ?,
+      published_version = ?, published_description = ?, published_topics_json = ?, metadata_captured_at = COALESCE(?, metadata_captured_at),
       rationale = ?, matched_terms_json = ?, relevant_occurrence_count = ?, relevant_best_rank = ?,
       relevant_median_rank = ?, error_code = NULL, error_message = NULL, updated_at = ?
      WHERE run_id = ? AND package_name = ?`,
@@ -445,7 +463,7 @@ async function persistPackageClassification(env: Env, runId: string, enriched: I
     metadata.version,
     metadata.description || null,
     JSON.stringify(metadata.topics),
-    enriched.metadata_captured_at,
+    enriched.metadata_captured_at ?? null,
     result.rationale,
     JSON.stringify(result.matchedTerms),
     metrics.occurrenceCount,

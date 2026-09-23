@@ -262,6 +262,23 @@ npx wrangler d1 export deeplinkx-visibility \
 
 Keep dated backups outside the Dart package and worktree. Do not copy live D1 files or commit exports.
 
+### Competitor review reconciliation
+
+The local `review-deeplinkx-competitors` skill writes frozen decisions and evidence outside both repositories. Reconcile those records through `scripts/reconcile-competitor-reviews.py`, which reads Cloudflare first, validates the exact deployed product commit, and keeps a response cache and phase checkpoint outside Git. Example:
+
+```bash
+python3 scripts/reconcile-competitor-reviews.py preview \
+  --manifest /absolute/path/outside/repository/manifest.json \
+  --output /absolute/path/outside/repository/reconciliation \
+  --secrets-file .dev.vars
+python3 scripts/reconcile-competitor-reviews.py sync --manifest /absolute/path/outside/repository/manifest.json --output /absolute/path/outside/repository/reconciliation --secrets-file .dev.vars --apply
+python3 scripts/reconcile-competitor-reviews.py import --manifest /absolute/path/outside/repository/manifest.json --output /absolute/path/outside/repository/reconciliation --secrets-file .dev.vars --limit 10 --apply
+python3 scripts/reconcile-competitor-reviews.py metrics --manifest /absolute/path/outside/repository/manifest.json --output /absolute/path/outside/repository/reconciliation --cloudflare-only
+python3 scripts/reconcile-competitor-reviews.py report --manifest /absolute/path/outside/repository/manifest.json --output /absolute/path/outside/repository/reconciliation
+```
+
+Preview is read-only; sync and import default to dry-run and require `--apply` for mutations. Use `--packages` or `--limit` for bounded batches. Metrics prefer timestamped Cloudflare observations, then matching frozen local observations, then a sequential two-second-spaced pub.dev score request. `--cloudflare-only` leaves missing values explicit. Confirmed noise is omitted from metric collection. The helper checkpoints each resource response before phase aggregation, refuses redirects and untrusted URLs, records rate-limit cooldowns, and stops the phase on D1 quota exhaustion. Resume after the recorded deadline; reuse the same output directory only while the frozen manifest and evidence hashes remain unchanged.
+
 ### Daily quota recovery
 
 The 1,500-query ceiling is a coverage bound, not a guarantee that a full audit and competitor enrichment fit in a free D1 day. D1 Free currently allows 100,000 rows written and 5 million rows read per account per UTC day; indexes also contribute writes. Scans, checkpoints, registry discovery, metrics, and classification share that allowance. A large run can span multiple daily resets. See [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) for current limits and paid-plan terms.
@@ -314,7 +331,7 @@ Migrated July full reports preserve DeeplinkX ranks but not the other packages r
 
 The inventory reads public provider declarations from an explicit clean product checkout. Every public action must have a mapped vocabulary and at least one query. Unsupported/new actions fail generation. Documentation mismatches are recorded instead of inventing APIs. `Available Actions`, `Usage`, and `Basic Usage` sections contribute action wording; platform/configuration headings do not. Short and verb-based queries run in full/top-100; they do not inflate pulse/top-10. The 1,500 full limit is enforced in both catalog validation and Worker configuration.
 
-The deterministic `capabilities-v2.3` classifier records multiple provider/action matches, source excerpts and URLs, migration caveats, and expansion flags. Automatic matches are provisional (`rule_matched`), not device-tested compatibility guarantees. Migration statuses are `supported`, `partial`, `unsupported`, and `needs_review`; automatic overlaps remain partial until reviewed. Plain-Dart URL construction, input normalization, platform-specific APIs, file/media sharing, and fallback behavior require distinct comparisons. The directory never infers unique users, conversions, or abandonment from downloads or release age.
+The deterministic `capabilities-v2.4` classifier records multiple provider/action matches, source excerpts and URLs, migration caveats, and expansion flags. Automatic matches are provisional (`rule_matched`), not device-tested compatibility guarantees. Migration statuses are `supported`, `partial`, `unsupported`, and `needs_review`; automatic overlaps remain partial until reviewed. Plain-Dart URL construction, input normalization, platform-specific APIs, file/media sharing, and fallback behavior require distinct comparisons. The directory never infers unique users, conversions, or abandonment from downloads or release age.
 
 ### Metrics and interfaces
 
@@ -326,7 +343,7 @@ The deterministic `capabilities-v2.3` classifier records multiple provider/actio
 
 ### Refresh, expansion discovery, and review
 
-Complete full reports trigger registry import, all-candidate classification, and supplemental discovery. Complete pulse reports refresh the relevant directory plus selected review candidates. Successful metadata and score resources are shared for seven days, README evidence for 30 days or until version change. Each successful resource is checkpointed before the next request; all outbound requests in the enrichment/discovery pipeline are sequential and honor `Retry-After`. Evidence/classifier/product changes invalidate old review decisions.
+Complete full reports trigger registry import, all-candidate classification, and supplemental discovery. Complete pulse reports refresh the relevant directory plus selected review candidates. Eligible metadata and score resources are shared for seven days. Usable README evidence is reused for its recorded version regardless of age. Each successful resource is checkpointed before the next request; all outbound requests in the enrichment/discovery pipeline are sequential and honor `Retry-After`. Semantic evidence and scope changes reopen reviewed decisions. Product or mapping-policy changes invalidate affected relevant comparisons; they do not reopen unchanged confirmed noise.
 
 Each pulse or explicit metrics refresh captures a score observation after its job was created, even when the previous score is less than seven days old. Retries reuse a successful observation from that same job; monthly discovery reuses fresh weekly metrics.
 
@@ -350,3 +367,22 @@ Migration `0004_competitor_intelligence.sql` adds the registry, permanent metric
 Migration `0005_competitor_lookup_index.sql` indexes package/status lookups so shared evidence updates do not repeatedly scan the complete classification history.
 
 After a deployment, synchronize the committed catalog from GitHub main and check its hash/counts before manual runs. Publish the reviewed catalog commit to main so a later scheduled sync cannot reactivate an older bundled catalog. Use unique idempotency keys for the weekly and monthly manual runs and wait for both report materialization and separate classification/job completion. For historical derived views, use the existing protected backfill without rewriting raw reports or exports.
+
+
+### Confirmed-noise policy and reconciliation
+
+Migration `0006_competitor_review_policy.sql` persists reviewed scope, semantic identity, provenance, reopening state, and processing outcomes. Only evidence-backed reviewed noise is a confirmed exclusion; automatic noise remains provisional. Confirmed noise receives no scheduled metadata, README, score, semantic review, or random sampling. Full/pulse admission, supplemental discovery, seeds, backfills, retries, and stale queued jobs apply the exclusion. Name-only discoveries remain recorded, and reusable decisions contribute to per-run classification totals. Existing metrics retain their timestamps; skipping collection is not a failure.
+
+Observed package-version or semantic evidence changes, review-scope changes, or explicit maintainer reopening enter pending review. Downloads, likes, timestamps, repeated appearances, release age, seed membership, classifier versions, and product commits do not reopen confirmed noise. Ordinary refresh cannot bypass an exclusion. Non-noise direct/adjacent packages qualify for metrics; pulse additionally selects at most 100 unresolved candidates using capability evidence, uncertainty, recorded downloads (missing last), and name. Newly classified noise never requests scores. Reviewed decisions are resolved before metric eligibility.
+
+Protected POST operations require bearer authorization and an `Idempotency-Key`:
+
+- `/api/v1/admin/competitors/policy/preview`: `{ "packages": ["draggable_menu"] }`, at most ten unique package names; read-only evidence bindings and policy states.
+- `/api/v1/admin/competitors/policy/reopen`: the same names plus a nonempty `reason`; changes eligibility without starting a search audit.
+- `/api/v1/admin/competitors/evidence/sync`: at most ten `packages`, default `dry_run: true`. Each entry supplies package identity, expected current evidence hash (or null), product commit, normalized metadata, versioned documentation, observation date, and HTTPS source provenance with content hashes. Hashes are computed server-side; submitted URLs are never fetched. Conflicting versions, changed bindings, newer conflicting evidence, and attempts to erase stored documentation require reconciliation.
+- `/api/v1/admin/competitors/refresh/packages`: up to ten package names, queued through the same exclusion policy; use for bounded verification without discovery searches.
+- `/api/v1/admin/competitors/processing`: administrative counts for policy states, processing states, and job outcomes.
+
+The existing five-field review-import contract remains unchanged. Reconcile evidence first, then import only decisions supporting the exact returned evidence hash and product commit. Unknown, stale, conflicting, and unbound decisions stay local drafts. Evidence synchronization alone does not approve a review. Public package details add processing status and policy state without removing existing fields.
+
+Keep frozen snapshots, local review ledgers, reconciliation checkpoints, metrics, usage records, and reports outside both repositories. On quota exhaustion stop the current collection phase and resume from its checkpoint after reset; do not repeat the failing operation for every package. Back up D1 externally before applying migrations, verify the backup, then deploy the tested commit. Validate with a bounded representative refresh, not another full search audit. Immutable exports remain unchanged by evidence sync and review imports.

@@ -37,6 +37,7 @@ export interface PackageAnalysis {
 }
 
 export interface IntelligencePackage extends PackageAnalysis {
+  processing_status?: string;
   package_name: string;
   published_version: string | null;
   published_at: string | null;

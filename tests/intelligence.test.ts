@@ -46,6 +46,48 @@ describe("capability discovery",()=>{
   expect(analyze("tmap_flutter_sdk","A Flutter plugin for TMAP (SK Open API) Vector Map v3. Supports markers and route planning.").relationship).toBe("noise");
   expect(analyze("apple_map_snapshotter","Generate static Apple Maps snapshots on iOS using MapKit.").relationship).toBe("noise");
  });
+ // Synthetic evidence fixtures exercise decisions; package names are regression labels, not live README snapshots.
+ it("recognizes package-owned actions even when metadata describes another main purpose",()=>{
+  const notifications=analyze("smart_notification_listener","A notification listener and logging utility.","The plugin can launch installed apps by package name.");
+  expect(notifications.relationship).toBe("direct");expect(notifications.actions).toContain("appLauncher");
+  const time=analyze("sync_time_ntp_totalxsoftware","An NTP clock synchronization utility.","The package can open external URLs in the default browser.");
+  expect(time.relationship).toBe("adjacent");expect(time.actions).toContain("openUrl");
+  expect(time.capabilities.every(c=>c.deeplinkx_apis.length===0)).toBe(true);
+  const payment=analyze("hyperpay_plugin","Payment authentication SDK with REST API support.","The plugin can launch external apps to complete payment.");
+  expect(payment.actions).toContain("appLauncher");expect(payment.relationship).toBe("direct");
+  const map=analyze("embedded_map","An embedded map widget SDK.","Launch directions in external maps.");
+  expect(map.actions).toContain("mapLauncher");
+ });
+ it("excludes setup operations without vetoing a separate genuine action",()=>{
+  const result=analyze("smart_notification_listener","A notification logging plugin.","Open Info.plist and add WhatsApp URL schemes. Share pubspec.lock files. The plugin can open WhatsApp.");
+  expect(result.actions).toEqual(["open"]);
+  expect(result.capabilities[0]?.evidence).toBe("The plugin can open WhatsApp.");
+  expect(analyze("hyperpay_plugin","Payment authentication SDK.","Open Info.plist to register a redirect URL. Handle incoming callback links.").capabilities).toHaveLength(0);
+ });
+ it("distinguishes logging transports and setup from opening a provider app",()=>{
+  for(const provider of ["Slack","Telegram"]){
+   const transport=analyze("logging_transport","Logging transport integration.",`Send messages to ${provider} through its API. Open ${provider} to create a webhook or BotFather bot token.`);
+   expect(transport.relationship).toBe("noise");expect(transport.capabilities).toHaveLength(0);
+   const launch=analyze("logging_transport","Logging transport integration.",`The package can open ${provider} app for viewing messages.`);
+   expect(launch.actions).toEqual(["open"]);expect(launch.relationship).toBe("direct");
+  }
+ });
+ it("keeps internal routing and ambiguous API names out of external capabilities",()=>{
+  const menu=analyze("draggable_menu","A draggable menu widget.","Open menu. Share lockfiles with collaborators. Internal routing uses Navigator.pushNamed to open pages.");
+  expect(menu.capabilities).toHaveLength(0);expect(menu.relationship).toBe("unknown");
+  const typed=analyze("typed_deep_links","Type safe incoming deep links and internal routing.","Generate app links for Navigator routes. Handle incoming universal links.");
+  expect(typed.relationship).toBe("adjacent");expect(typed.actions).not.toContain("buildUrl");
+  const ambiguous=analyze("sync_time_ntp_totalxsoftware","NTP time synchronization.","Methods: open(), share(), launch().");
+  expect(ambiguous.relationship).toBe("unknown");expect(ambiguous.capabilities).toHaveLength(0);
+ });
+ it("requires action-local targets instead of combining unrelated documentation sections",()=>{
+  const result=analyze("mixed_actions","Integration with WhatsApp and Telegram.","Open a local file. WhatsApp configuration. Send diagnostic records. Telegram text support. Share images to WhatsApp.");
+  expect(result.actions).toEqual(["shareFiles"]);
+  expect(result.capabilities[0]?.migration).toBe("unsupported");
+  const generic=analyze("browser_links","Open external URLs.","Supported URL examples include WhatsApp and Telegram.");
+  expect(generic.actions).toEqual(["openUrl"]);
+  expect(generic.capabilities[0]?.deeplinkx_apis).toEqual([]);
+ });
  it("isolates README evidence from dependencies and scripts",()=>{
   expect(readmeText('<section class="tab-content detail-tab-readme"><p>Share WhatsApp text</p><script>noise()</script></section><aside>Telegram profile</aside>')).toBe("Share WhatsApp text");
   expect(()=>readmeText("changed HTML")).toThrow(/container/);
