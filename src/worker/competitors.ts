@@ -518,8 +518,13 @@ export async function markCompetitorFailed(
 }
 
 export async function competitorClassificationsReady(env: Env, runId: string): Promise<boolean> {
-  const state = await classificationState(env, runId);
-  return state.total === 0 || state.planned + state.queued + state.running === 0;
+  // This check runs after each package job. Aggregating every status would scan
+  // the full run once per package; the existing (run_id, status) index makes
+  // this bounded existence check stop at the first outstanding classification.
+  const pending = await env.DB.prepare(`SELECT 1 AS pending FROM competitor_classifications
+    WHERE run_id=? AND status IN ('planned','queued','running') LIMIT 1`)
+    .bind(runId).first<{pending:number}>();
+  return pending === null;
 }
 
 export async function completeCompetitorEnrichment(

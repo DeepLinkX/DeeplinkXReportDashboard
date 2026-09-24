@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   RetryableCompetitorError,
   competitorClassificationSummary,
+  competitorClassificationsReady,
   markCompetitorFailed,
   recordCompetitorRetry,
   startCompetitorBackfill,
@@ -117,6 +118,17 @@ describe("competitor classification runtime", () => {
     expect(payload.competitors).toEqual([]);
     expect(payload.classification.status).toBe("unavailable");
     expect(payload.classification.reason).toMatch(/cannot be reconstructed honestly/);
+  });
+
+  it("checks pending classification work through the status index", async () => {
+    const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN SELECT 1 AS pending FROM competitor_classifications
+      WHERE run_id='classified-run' AND status IN ('planned','queued','running') LIMIT 1`).all<{detail:string}>();
+    expect(plan.results.some((row) => row.detail.includes("competitor_classifications_status"))).toBe(true);
+    expect(await competitorClassificationsReady(env,"classified-run")).toBe(true);
+    await env.DB.prepare("UPDATE competitor_classifications SET status='queued' WHERE run_id='classified-run' AND package_name='map_launcher'").run();
+    expect(await competitorClassificationsReady(env,"classified-run")).toBe(false);
+    await env.DB.prepare("UPDATE competitor_classifications SET status='complete' WHERE run_id='classified-run' AND package_name='map_launcher'").run();
+    expect(await competitorClassificationsReady(env,"classified-run")).toBe(true);
   });
 
   it("keeps backfills idempotent when a run is already classified", async () => {
