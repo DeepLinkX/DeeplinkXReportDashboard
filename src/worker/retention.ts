@@ -101,6 +101,7 @@ async function capacityRatio(env: Env): Promise<number> {
     "SELECT COALESCE(SUM(LENGTH(decision_json)+512),0) AS bytes FROM competitor_reviews",
     "SELECT COALESCE(SUM(LENGTH(rationale) + LENGTH(evidence_json) + 512), 0) AS bytes FROM recommendations",
     "SELECT COALESCE(SUM(LENGTH(content) + 512), 0) AS bytes FROM report_artifacts",
+    "SELECT COALESCE(SUM(LENGTH(content) + 128), 0) AS bytes FROM report_artifact_chunks",
     "SELECT COALESCE(SUM(LENGTH(content) + LENGTH(provenance_json) + 512), 0) AS bytes FROM legacy_documents",
     "SELECT COALESCE(SUM(LENGTH(verification_json) + 512), 0) AS bytes FROM migration_records",
     "SELECT COALESCE(SUM(LENGTH(body) + LENGTH(headers_json) + 512), 0) AS bytes FROM raw_http_bodies",

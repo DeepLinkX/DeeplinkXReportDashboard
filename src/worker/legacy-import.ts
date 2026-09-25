@@ -1,6 +1,7 @@
 import { sha256Hex } from "../shared/catalog.js";
 import type { LegacyImportPayload } from "../shared/types.js";
 import { activeCatalog } from "./catalog-store.js";
+import { storeReportArtifact } from "./artifacts.js";
 
 function csvCell(value: unknown): string {
   const text = value === null || value === undefined ? "" : String(value);
@@ -145,11 +146,11 @@ export async function importLegacyDocument(env: Env, payload: LegacyImportPayloa
     { type: "json", filename: `${base}.json`, contentType: "application/json; charset=utf-8", content: normalizedJson },
   ];
   for (const artifact of artifacts) {
-    await env.DB.prepare(
-      `INSERT INTO report_artifacts (
-        id, run_id, artifact_type, filename, content_type, content, content_hash, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(`${run.id}:${artifact.type}`, run.id, artifact.type, artifact.filename, artifact.contentType, artifact.content, await sha256Hex(artifact.content), now).run();
+    await storeReportArtifact(env, {
+      id: `${run.id}:${artifact.type}`, runId: run.id, type: artifact.type as "markdown" | "csv" | "json",
+      filename: artifact.filename, contentType: artifact.contentType, content: artifact.content,
+      contentHash: await sha256Hex(artifact.content), createdAt: now,
+    });
   }
 
   const migrationId = crypto.randomUUID();

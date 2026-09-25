@@ -1,4 +1,5 @@
 import { packageNames, policyPreview, processingCounters, syncEvidence } from "./evidence-sync.js";
+import { loadReportArtifactContent } from "./artifacts.js";
 import { reopenReview } from "./review-policy.js";
 import { admitStartup, startupMessage, startupStatus, StartupQueueUnavailable } from "./startup.js";
 import type { AuditProfile } from "../shared/types.js";
@@ -327,10 +328,11 @@ async function comparison(env: Env, url: URL): Promise<Response> {
 async function exportArtifact(env: Env, runId: string, format: string): Promise<Response> {
   if (!["markdown", "csv", "json"].includes(format)) return errorResponse(404, "Export format not found.");
   const artifact = await env.DB.prepare(
-    "SELECT filename, content_type, content, content_hash FROM report_artifacts WHERE run_id = ? AND artifact_type = ?",
-  ).bind(runId, format).first<{ filename: string; content_type: string; content: string; content_hash: string }>();
+    "SELECT id, filename, content_type, content, content_hash, content_storage FROM report_artifacts WHERE run_id = ? AND artifact_type = ?",
+  ).bind(runId, format).first<{ id: string; filename: string; content_type: string; content: string; content_hash: string; content_storage: "inline" | "chunked" }>();
   if (!artifact) return errorResponse(404, "Export not found.");
-  return new Response(artifact.content, {
+  const content = await loadReportArtifactContent(env, artifact);
+  return new Response(content, {
     headers: {
       ...SECURITY_HEADERS,
       "content-type": artifact.content_type,

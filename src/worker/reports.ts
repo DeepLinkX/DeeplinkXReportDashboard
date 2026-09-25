@@ -1,5 +1,6 @@
 import { NOISE_TERMS, normalize, semanticText, sha256Hex } from "../shared/catalog.js";
 import type { RecommendationClass } from "../shared/types.js";
+import { storeReportArtifact } from "./artifacts.js";
 import {
   aggregateCompetitors,
   ensureCompetitorClassifications,
@@ -310,15 +311,10 @@ async function storeArtifact(
   content: string,
 ): Promise<void> {
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO report_artifacts (id, run_id, artifact_type, filename, content_type, content, content_hash, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(run_id, artifact_type) DO UPDATE SET
-       filename = excluded.filename,
-       content_type = excluded.content_type,
-       content = excluded.content,
-       content_hash = excluded.content_hash`,
-  ).bind(`${runId}:${type}`, runId, type, filename, contentType, content, await sha256Hex(content), now).run();
+  await storeReportArtifact(env, {
+    id: `${runId}:${type}`, runId, type, filename, contentType, content,
+    contentHash: await sha256Hex(content), createdAt: now,
+  });
 }
 
 export async function finalizeRun(env: Env, runId: string): Promise<void> {

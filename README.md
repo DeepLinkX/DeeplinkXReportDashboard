@@ -167,6 +167,20 @@ npm run deploy
 
 `npm run build` performs a Vite production build and Wrangler dry run. The Worker deploy includes Static Assets, public/private APIs, Queue handlers, and the two Cron triggers. Do not enable or change schedules until production migration and a manual pulse reconcile successfully.
 
+### Restore and move a D1 snapshot without a second full export
+
+For the September 22 recovery snapshot, use the existing external `pre-policy-backup.sql`; do not make another full export just to replay it. Keep the backup, migrated SQLite file, manifests, chunks, progress files, and temporary credentials outside this repository. `scripts/prepare-d1-backup.py prepare` imports the SQL locally, applies migrations absent from that snapshot, chunks oversized immutable report artifacts while preserving their original hashes, and checks SQLite and foreign-key integrity. `verify` repeats the integrity and artifact-hash checks. `chunks` creates deterministic, individually hashed batches for a fresh D1. It refuses output inside a Git checkout and never replaces an existing database or non-empty chunk directory.
+
+Run `python3 scripts/test_prepare_d1_backup.py` to exercise UTF-8 splitting, foreign-key ordering, deterministic chunk hashes, artifact integrity detection, and repository-path protection before preparing a snapshot.
+
+The temporary protected importer writes only to the explicitly configured staging D1. It accepts an allowlist of tables, validates each payload hash, writes a receipt in the same D1 batch as its rows, and makes uncertain-response retries idempotent. Resume with the same manifest and progress file; the importer checks its receipt if a response was saved before the local checkpoint. The default daily budget is 20,000 D1 rows written, leaving room for the live dashboard on the account's Free plan. D1 quotas are account-wide: creating another database does not reset daily read/write quotas. A quota response stores a `resume_after` checkpoint; rerun only after that UTC reset. Do not exceed the account's remaining write budget while scheduled dashboard processing is active.
+
+Do not change the production Worker binding until the staging database passes row-count reconciliation, SQLite-to-D1 artifact hash checks, migration checks, and API smoke tests. During cutover, update only the D1 binding and retain the Worker, database history, queues, schedule, public URL, and cron expressions. Keep the previous D1 available for rollback until the new binding passes production health and report-history checks. Never import operational receipt rows from the source snapshot; they are generated for the destination's resumable import.
+
+Reports larger than 1.5 MB are stored as ordered 256 KB UTF-8 chunks. API exports reconstruct the original content and verify its stored SHA-256 before returning it, so public filenames, content types, and immutable hashes remain stable. The 2 MB D1 value limit applies to individual values; chunking allows the existing larger report exports to remain available.
+
+The review skill can use the same frozen snapshot in read-only mode with `review.py collect --sqlite-db ...` and `review.py prepare --sqlite-db ...`. This mode makes no Cloudflare or pub.dev requests and must label the September 22 evidence as a frozen snapshot, not current live data.
+
 For a competitor-classification release, create and verify an external D1 backup first, apply pending migrations, and deploy. Start audits only when explicitly requested. When both profiles are requested for one UTC date, complete the pulse first: an active/completed full run makes a later pulse skip. Then enqueue the idempotent derived-data backfill; this does not rescan historical pub.dev results or rewrite immutable exports:
 
 ```bash

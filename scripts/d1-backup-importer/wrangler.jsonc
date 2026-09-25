@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4.127.0/config-schema.json",
+  "name": "deeplinkx-backup-importer",
+  "main": "worker.ts",
+  "compatibility_date": "2026-09-25",
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "deeplinkx-visibility-v2",
+      "database_id": "24894054-9452-4984-b8cc-7d2f64ec9aaa",
+      "migrations_dir": "../../migrations"
+    }
+  ]
+}
