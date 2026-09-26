@@ -10,7 +10,7 @@ export default defineConfig(async () => {
       additionalExports: { PublicAPI: "WorkerEntrypoint" },
       miniflare: {
         compatibilityDate: "2026-08-22",
-        bindings: { TEST_MIGRATIONS: migrations },
+        bindings: { TEST_MIGRATIONS: migrations, D1_WRITES_PAUSED: "false" },
       },
       wrangler: { configPath: "./wrangler.jsonc" },
     })],

@@ -60,3 +60,35 @@ describe("D1 daily quota recovery", () => {
     expect(await response.json()).toMatchObject({ error: expect.stringContaining("daily quota") });
   });
 });
+
+describe("temporary D1 write pause", () => {
+  it("rejects mutating HTTP requests before accessing D1", async () => {
+    const f = fixture({ kind: "intelligence", jobId: "paused-job" });
+    (f.env as Env).D1_WRITES_PAUSED = "true";
+    const response = await worker.fetch(
+      new Request("https://test/api/v1/admin/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profile: "pulse" }),
+      }),
+      f.env,
+      {} as ExecutionContext,
+    );
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({ error: "database_read_only" });
+    expect((f.env.DB as unknown as { prepare: ReturnType<typeof vi.fn> }).prepare).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["deeplinkx-visibility-scan", { kind: "scan-query", runId: "paused-run", queryId: "paused-query" }],
+    ["deeplinkx-visibility-dlq", { kind: "scan-query", runId: "paused-run", queryId: "paused-query" }],
+  ] as const)("reschedules queue work from %s without accessing D1", async (queue, body) => {
+    const f = fixture(body, queue);
+    (f.env as Env).D1_WRITES_PAUSED = "true";
+    await worker.queue(f.batch, f.env, {} as ExecutionContext);
+    expect(f.send).toHaveBeenCalledWith(body, { delaySeconds: 43_140 });
+    expect(f.message.ack).toHaveBeenCalledOnce();
+    expect((f.env.DB as unknown as { prepare: ReturnType<typeof vi.fn> }).prepare).not.toHaveBeenCalled();
+  });
+});

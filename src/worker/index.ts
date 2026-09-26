@@ -197,6 +197,19 @@ async function deferPubdev(message: Message<AuditQueueMessage>, env: Env, error:
 
 export default {
   async fetch(request, env, context): Promise<Response> {
+    if (env.D1_WRITES_PAUSED === "true" && !["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      return new Response(JSON.stringify({
+        error: "database_read_only",
+        message: "Writes are temporarily paused during database recovery.",
+      }), {
+        status: 503,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          "retry-after": "43200",
+        },
+      });
+    }
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
       const publicRequest = canonicalPublicRequest(request);
@@ -217,6 +230,15 @@ export default {
   },
 
   async queue(batch, env, context): Promise<void> {
+    if (env.D1_WRITES_PAUSED === "true") {
+      for (const message of batch.messages) {
+        // Reschedule before acknowledging so paused work survives without touching D1.
+        await env.SCAN_QUEUE.send(message.body, { delaySeconds: 43_140 });
+        message.ack();
+      }
+      console.warn(JSON.stringify({ code: "d1-writes-paused", messages: batch.messages.length }));
+      return;
+    }
     for (const message of batch.messages) {
       try {
         if (batch.queue === "deeplinkx-visibility-dlq") {
