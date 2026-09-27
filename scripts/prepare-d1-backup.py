@@ -7,6 +7,7 @@ Only the standard library is required.
 import argparse
 import base64
 import datetime as dt
+import http.client
 import hashlib
 import json
 import os
@@ -348,7 +349,7 @@ def import_chunks(args):
                                   'resume_after': state['resume_after']}))
                 return 75
             raise RuntimeError(f'Importer HTTP {error.code}; checkpoint retained: {response_body[:300]}') from None
-        except (urllib.error.URLError, TimeoutError) as error:
+        except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected, OSError) as error:
             try:
                 status, headers, response_body = curl_fallback(endpoint, body, token, output)
             except RuntimeError as fallback_error:
