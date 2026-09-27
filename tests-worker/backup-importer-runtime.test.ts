@@ -16,6 +16,26 @@ async function digest(value: unknown): Promise<string> {
 beforeAll(async () => applyD1Migrations(env.DB, env.TEST_MIGRATIONS));
 
 describe("temporary D1 backup importer", () => {
+  it("replaces the migration-seeded system state with the frozen snapshot row", async () => {
+    const payload = {
+      table: "system_state",
+      columns: ["key", "value_json", "updated_at"],
+      rows: [["retention", "{\"retain_raw\":false,\"pause_full\":true,\"capacity_ratio\":0.25}", "2026-09-22T00:00:00Z"]],
+    };
+    const source_sha256 = await digest(payload);
+    const response = await importer.fetch(new Request("https://import.test/chunks", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ ...payload, chunk_id: "test-retention-seed", source_sha256 }),
+    }), { DB: env.DB, IMPORT_TOKEN: token }, {} as ExecutionContext);
+
+    expect(response.status).toBe(200);
+    expect(await env.DB.prepare("SELECT value_json,updated_at FROM system_state WHERE key='retention'")
+      .first<{ value_json: string; updated_at: string }>()).toEqual({
+        value_json: "{\"retain_raw\":false,\"pause_full\":true,\"capacity_ratio\":0.25}",
+        updated_at: "2026-09-22T00:00:00Z",
+      });
+  });
+
   it("imports one bounded chunk once and rejects conflicting reuse", async () => {
     const payload = { table: "system_state", columns: ["key", "value_json", "updated_at"], rows: [["import-test", "{}", "2026-09-25T00:00:00Z"]] };
     const source_sha256 = await digest(payload);

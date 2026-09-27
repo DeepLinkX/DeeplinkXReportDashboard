@@ -103,8 +103,12 @@ export default {
       const table = `"${input.table}"`;
       const columns = input.columns.map((column) => `"${column}"`).join(",");
       const values = `(${input.columns.map(() => "?").join(",")})`;
+      // Migration 0001 seeds `system_state.retention`; the frozen snapshot is authoritative.
+      const conflict = input.table === "system_state"
+        ? " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at"
+        : "";
       const statements = input.rows.map((row) => env.DB.prepare(
-        `INSERT INTO ${table} (${columns}) VALUES ${values}`,
+        `INSERT INTO ${table} (${columns}) VALUES ${values}${conflict}`,
       ).bind(...row.map(decode)));
       statements.push(env.DB.prepare("INSERT INTO backup_import_receipts(chunk_id,source_sha256,row_count,imported_at) VALUES(?,?,?,?)")
         .bind(input.chunk_id, input.source_sha256, input.rows.length, new Date().toISOString()));
