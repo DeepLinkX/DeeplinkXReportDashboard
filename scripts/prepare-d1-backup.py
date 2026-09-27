@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 
 
@@ -54,6 +55,46 @@ def save_json(path, value):
     finally:
         if temporary:
             temporary.unlink(missing_ok=True)
+
+
+def curl_fallback(endpoint, body, token, directory):
+    """Retry an uncertain urllib request through curl, preserving the same idempotency key."""
+    with tempfile.TemporaryDirectory(prefix='d1-import-curl-', dir=directory) as temporary:
+        temporary = Path(temporary)
+        payload_path = temporary / 'payload.json'
+        headers_path = temporary / 'response-headers.txt'
+        response_path = temporary / 'response-body.json'
+        payload_path.write_text(json.dumps(body, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+        config = '\n'.join((
+            f'url = "{endpoint}"',
+            'request = "POST"',
+            f'data-binary = "@{payload_path}"',
+            f'dump-header = "{headers_path}"',
+            f'output = "{response_path}"',
+            'write-out = "%{http_code}"',
+            'silent',
+            'show-error',
+            'max-time = 90',
+            f'header = "Authorization: Bearer {token}"',
+            'header = "Content-Type: application/json"',
+            'header = "Accept: application/json"',
+            'header = "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"',
+            '',
+        ))
+        completed = subprocess.run(
+            ['curl', '--config', '-'], input=config.encode('utf-8'), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        status_text = completed.stdout.decode('ascii', errors='replace').strip()
+        if completed.returncode or not status_text.isdigit():
+            raise RuntimeError(f'curl fallback failed with exit {completed.returncode}')
+        headers = {}
+        for line in headers_path.read_text(encoding='latin-1').splitlines():
+            name, separator, value = line.partition(':')
+            if separator:
+                headers[name.strip().lower()] = value.strip()
+        response = response_path.read_bytes()
+        return int(status_text), headers, response
 
 
 def split_text(value, max_bytes):
@@ -284,7 +325,8 @@ def import_chunks(args):
         body = {**payload, 'chunk_id': chunk['chunk_id'], 'source_sha256': chunk['sha256']}
         request = urllib.request.Request(endpoint, data=json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode(),
                                          headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json',
-                                                  'Accept': 'application/json'}, method='POST')
+                                                  'Accept': 'application/json',
+                                                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'}, method='POST')
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
                 result = json.loads(response.read(1024 * 1024))
@@ -306,10 +348,37 @@ def import_chunks(args):
                                   'resume_after': state['resume_after']}))
                 return 75
             raise RuntimeError(f'Importer HTTP {error.code}; checkpoint retained: {response_body[:300]}') from None
-        except (urllib.error.URLError, TimeoutError):
-            state.update(status='request_uncertain', last_chunk=chunk['chunk_id'])
-            save_json(progress_path, state)
-            raise RuntimeError('Importer response uncertain; rerun to check its idempotent receipt') from None
+        except (urllib.error.URLError, TimeoutError) as error:
+            try:
+                status, headers, response_body = curl_fallback(endpoint, body, token, output)
+            except RuntimeError as fallback_error:
+                state.update(status='request_uncertain', last_chunk=chunk['chunk_id'])
+                save_json(progress_path, state)
+                reason = getattr(error, 'reason', error)
+                raise RuntimeError(
+                    f'Importer response uncertain ({reason}); fallback failed; rerun to check its idempotent receipt'
+                ) from fallback_error
+            decoded_body = response_body.decode('utf-8', errors='replace')
+            if status == 429 and 'daily_quota_exhausted' in decoded_body:
+                retry_after = headers.get('retry-after', '60')
+                try:
+                    resume = dt.datetime.now(dt.timezone.utc).timestamp() + max(60, float(retry_after))
+                except ValueError:
+                    try:
+                        resume = email.utils.parsedate_to_datetime(retry_after).timestamp()
+                    except (ValueError, TypeError):
+                        resume = dt.datetime.now(dt.timezone.utc).timestamp() + 60
+                state.update(status='quota_deferred', resume_after=dt.datetime.fromtimestamp(resume, dt.timezone.utc).isoformat(),
+                             budget_date=today, today_rows_written=used_today)
+                save_json(progress_path, state)
+                print(json.dumps({'status': state['status'], 'completed_chunks': len(state['completed']),
+                                  'resume_after': state['resume_after']}))
+                return 75
+            if status != 200:
+                state.update(status='request_uncertain', last_chunk=chunk['chunk_id'])
+                save_json(progress_path, state)
+                raise RuntimeError(f'Importer fallback HTTP {status}; checkpoint retained: {decoded_body[:300]}')
+            result = json.loads(decoded_body)
         if result.get('chunk_id') != chunk['chunk_id'] or result.get('status') not in ('imported', 'already_imported'):
             raise RuntimeError(f"Unexpected importer result for {chunk['chunk_id']}")
         state['completed'][chunk['chunk_id']] = {'rows': chunk['rows'], 'source_sha256': chunk['sha256'],

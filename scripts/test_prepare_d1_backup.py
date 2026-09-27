@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name('prepare-d1-backup.py')
@@ -13,6 +14,29 @@ SPEC.loader.exec_module(prepare)
 
 
 class BackupPreparationTests(unittest.TestCase):
+    def test_curl_fallback_reuses_chunk_body_and_parses_response(self):
+        with tempfile.TemporaryDirectory(prefix='deeplinkx-curl-test-', dir='/private/tmp') as root:
+            def fake_run(args, input, stdout, stderr, check):
+                config = input.decode('utf-8')
+                headers_path = Path(next(line.split(' = ', 1)[1].strip('"') for line in config.splitlines()
+                                         if line.startswith('dump-header = ')))
+                response_path = Path(next(line.split(' = ', 1)[1].strip('"') for line in config.splitlines()
+                                          if line.startswith('output = ')))
+                payload_path = Path(next(line.split(' = ', 1)[1].strip('"@') for line in config.splitlines()
+                                         if line.startswith('data-binary = ')))
+                self.assertEqual(json.loads(payload_path.read_text()), {'chunk_id': 'same-id'})
+                headers_path.write_text('HTTP/2 200\r\nContent-Type: application/json\r\n')
+                response_path.write_text('{"status":"imported","chunk_id":"same-id"}')
+                return prepare.subprocess.CompletedProcess(args, 0, b'200', b'')
+
+            with mock.patch.object(prepare.subprocess, 'run', side_effect=fake_run):
+                status, headers, response = prepare.curl_fallback(
+                    'https://importer.invalid/chunks', {'chunk_id': 'same-id'}, 'test-token', Path(root))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['content-type'], 'application/json')
+        self.assertEqual(json.loads(response), {'status': 'imported', 'chunk_id': 'same-id'})
+
     def test_split_text_preserves_utf8_and_respects_byte_limit(self):
         value = 'a😀終é' * 100
         parts = prepare.split_text(value, 17)
