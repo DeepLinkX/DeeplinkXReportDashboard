@@ -151,7 +151,7 @@ Reports and exports must be materialized and verified before their raw inputs ar
 
 ## Maintainer operations
 
-Run commands from this repository root. Use the authenticated Cloudflare account that owns `deeplinkx-visibility`, its D1 database, and the scan/dead-letter queues.
+Run commands from this repository root. Use the authenticated Cloudflare account that owns Worker `deeplinkx-visibility`, its canonical D1 database `deeplinkx-visibility-v2`, and the scan/dead-letter queues.
 
 ### Install, verify, migrate, and deploy
 
@@ -173,7 +173,7 @@ For the September 22 recovery snapshot, use the existing external `pre-policy-ba
 
 Run `python3 scripts/test_prepare_d1_backup.py` to exercise UTF-8 splitting, foreign-key ordering, deterministic chunk hashes, artifact integrity detection, and repository-path protection before preparing a snapshot.
 
-The temporary protected importer writes only to the explicitly configured staging D1. It accepts an allowlist of tables, validates each payload hash, writes a receipt in the same D1 batch as its rows, and makes uncertain-response retries idempotent. Resume with the same manifest and progress file; the importer checks its receipt if a response was saved before the local checkpoint. The default daily budget is 20,000 D1 rows written, leaving room for the live dashboard on the account's Free plan. D1 quotas are account-wide: creating another database does not reset daily read/write quotas. A quota response stores a `resume_after` checkpoint; rerun only after that UTC reset. Do not exceed the account's remaining write budget while scheduled dashboard processing is active.
+The temporary protected importer writes only to the explicitly configured staging D1. It accepts an allowlist of tables, validates each payload hash, writes a receipt in the same D1 batch as its rows, and makes uncertain-response retries idempotent. Resume with the same manifest and progress file; the importer checks its receipt if a response was saved before the local checkpoint. Import chunks run sequentially and stop on Cloudflare's quota-exhausted response, preserving the checkpoint for the next UTC reset. D1 quotas are account-wide: creating another database does not reset daily read/write quotas. Check live usage before starting and do not retry a quota-deferred chunk until its recorded reset time.
 
 Do not change the production Worker binding until the staging database passes row-count reconciliation, SQLite-to-D1 artifact hash checks, migration checks, and API smoke tests. During cutover, update only the D1 binding and retain the Worker, database history, queues, schedule, public URL, and cron expressions. Keep the previous D1 available for rollback until the new binding passes production health and report-history checks. Never import operational receipt rows from the source snapshot; they are generated for the destination's resumable import.
 
@@ -269,7 +269,7 @@ Use `cloudflare-catalog-sync --bundled` only to activate an explicitly reviewed 
 Create backups outside the repository and verify that the output exists and is non-empty:
 
 ```bash
-npx wrangler d1 export deeplinkx-visibility \
+npx wrangler d1 export deeplinkx-visibility-v2 \
   --remote \
   --output /absolute/path/outside/repository/deeplinkx-visibility-YYYY-MM-DD.sql
 ```
@@ -303,7 +303,7 @@ During snapshot recovery, `D1_WRITES_PAUSED=true` blocks all mutating HTTP metho
 
 Inspect Worker logs for `d1-daily-quota-deferred`, verify that the original run resumes after reset, and let its enrichment finish before assessing completeness. Never delete history or invent a new run date to bypass quota or daily report conflicts. A paid-plan change requires separate billing authorization; deployment does not authorize it.
 
-For quota attribution, start with `npx wrangler d1 info deeplinkx-visibility` and `npx wrangler d1 insights deeplinkx-visibility --time-period 1d --sort-by reads --sort-type sum --sort-direction DESC --limit 20 --json`. The insights endpoint reports query patterns and aggregate rows scanned without issuing SQL against D1. Follow the largest repeated scans before retrying migration or report work. In particular, avoid running a full-table status aggregate once per package job; use an indexed pending-row existence check when the caller only needs readiness.
+For quota attribution, start with `npx wrangler d1 info deeplinkx-visibility-v2` and `npx wrangler d1 insights deeplinkx-visibility-v2 --time-period 1d --sort-by reads --sort-type sum --sort-direction DESC --limit 20 --json`. The insights endpoint reports query patterns and aggregate rows scanned without issuing SQL against D1. Follow the largest repeated scans before retrying migration or report work. In particular, avoid running a full-table status aggregate once per package job; use an indexed pending-row existence check when the caller only needs readiness.
 
 ### Automatic startup recovery
 

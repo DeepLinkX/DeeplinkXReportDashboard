@@ -32,8 +32,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "deeplinkx-visibility",
-      "database_id": "ec1078c7-bcf5-405a-aaf6-116a207f0ac5",
+      "database_name": "deeplinkx-visibility-v2",
+      "database_id": "24894054-9452-4984-b8cc-7d2f64ec9aaa",
       "migrations_dir": "migrations"
     }
   ],
@@ -68,7 +68,7 @@
     "PULSE_QUERY_LIMIT": "120",
     "FULL_QUERY_LIMIT": "1500",
     "D1_CAPACITY_BYTES": "524288000",
-    "D1_WRITES_PAUSED": "true",
+    "D1_WRITES_PAUSED": "false",
     "RAW_RETENTION_DAYS": "90",
     "DIAGNOSTIC_RETENTION_DAYS": "30"
   },
