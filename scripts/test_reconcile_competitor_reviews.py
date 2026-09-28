@@ -44,6 +44,27 @@ class ReconcileTests(unittest.TestCase):
             self.assertNotIn('env-secret', file.read_text())
             self.assertNotIn('Authorization', file.read_text())
 
+    def test_cloudflare_transport_uses_system_curl_and_removes_private_config(self):
+        seen = {}
+        def run(command, **kwargs):
+            config = Path(command[command.index('--config') + 1])
+            seen['config_path'] = config
+            seen['config'] = config.read_text()
+            seen['mode'] = config.stat().st_mode & 0o777
+            seen['body'] = kwargs['input']
+            output = (b'HTTP/2 200\r\ncontent-type: application/json\r\nretry-after: 7\r\n\r\n'
+                b'{"ok":true}\n__DEEPLINKX_HTTP_STATUS__:200')
+            return r.subprocess.CompletedProcess(command, 0, output, b'')
+        with patch.object(r.subprocess, 'run', side_effect=run):
+            client = r.Client(self.out, 'test-token')
+            result = client.request(r.ADMIN + 'policy/preview', {'packages': ['example']}, protected=True)
+        self.assertEqual(result, {'ok': True})
+        self.assertIn('Authorization: Bearer test-token', seen['config'])
+        self.assertEqual(seen['mode'], 0o600)
+        self.assertTrue(seen['config'].endswith('data = "@-"\n'))
+        self.assertEqual(json.loads(seen['body']), {'packages': ['example']})
+        self.assertFalse(seen['config_path'].exists())
+
     def test_429_deadline_and_no_network_resume_before_retry_after(self):
         count = 0
         def opener(*_, **__):

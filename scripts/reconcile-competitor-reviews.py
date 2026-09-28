@@ -8,10 +8,12 @@ import datetime as dt
 import email.utils
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -96,10 +98,67 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, "Redirect refused", headers, fp)
 
 
+class CurlResponse:
+    def __init__(self, body, headers):
+        self.body, self.headers = body, headers
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
+    def read(self, limit=-1): return self.body if limit < 0 else self.body[:limit]
+
+
+def curl_open(req, timeout=60):
+    """Use the system HTTP client for Cloudflare, whose WAF rejects urllib's UA."""
+    config = [f'url = {json.dumps(req.full_url)}', f'request = {json.dumps(req.get_method())}',
+        f'max-time = {int(timeout)}', 'max-redirs = 0', 'silent', 'show-error']
+    for name, value in req.header_items():
+        config.append(f'header = {json.dumps(name + ": " + value)}')
+    if req.data is not None:
+        config.append('data = "@-"')
+    config_path = None
+    try:
+        with tempfile.NamedTemporaryFile('w', encoding='utf-8', prefix='deeplinkx-curl-', suffix='.conf', delete=False) as stream:
+            config_path = Path(stream.name)
+            os.chmod(config_path, 0o600)
+            stream.write('\n'.join(config) + '\n')
+        completed = subprocess.run(['curl', '--config', str(config_path), '--dump-header', '-',
+            '--write-out', '\n__DEEPLINKX_HTTP_STATUS__:%{http_code}'], input=req.data,
+            capture_output=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise urllib.error.URLError('Cloudflare request failed') from None
+    finally:
+        if config_path is not None:
+            config_path.unlink(missing_ok=True)
+    marker = b'\n__DEEPLINKX_HTTP_STATUS__:'
+    marker_at = completed.stdout.rfind(marker)
+    if completed.returncode or marker_at < 0:
+        raise urllib.error.URLError('Cloudflare request failed')
+    try:
+        status = int(completed.stdout[marker_at + len(marker):].strip())
+    except ValueError:
+        raise urllib.error.URLError('Cloudflare returned an invalid status') from None
+    response = completed.stdout[:marker_at]
+    header, separator, body = response.partition(b'\r\n\r\n')
+    if not separator:
+        header, separator, body = response.partition(b'\n\n')
+    if not separator:
+        raise urllib.error.URLError('Cloudflare returned an invalid response')
+    headers = {}
+    for line in header.decode('iso-8859-1').splitlines()[1:]:
+        if ':' in line:
+            name, value = line.split(':', 1)
+            headers[name.strip().lower()] = value.strip()
+    if len(body) > 4_000_000:
+        raise urllib.error.URLError('Cloudflare response exceeded the 4 MB limit')
+    if status >= 400:
+        raise urllib.error.HTTPError(req.full_url, status, 'Cloudflare request failed', headers, io.BytesIO(body))
+    return CurlResponse(body, headers)
+
+
 class Client:
     def __init__(self, out, token=None, opener=None):
         self.out, self.token = Path(out), token
-        self.opener = opener or urllib.request.build_opener(NoRedirect()).open
+        self.opener = opener
+        self.pubdev_opener = urllib.request.build_opener(NoRedirect()).open
 
     def request(self, path, payload=None, protected=False, key=None, allow_missing=False):
         # Persist successful response before phase aggregation. Identical retries
@@ -135,7 +194,8 @@ class Client:
             cooldown['last_pubdev_request'] = time.time()
             save(self.out / 'http-state.json', cooldown)
         try:
-            with self.opener(req, timeout=60) as response:
+            opener = self.opener or (curl_open if url.startswith(ORIGIN + '/') else self.pubdev_opener)
+            with opener(req, timeout=60) as response:
                 result = json.loads(response.read(4_000_001))
         except urllib.error.HTTPError as exc:
             error_body = exc.read(20000).decode(errors='replace')
