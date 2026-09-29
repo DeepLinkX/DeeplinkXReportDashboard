@@ -129,6 +129,15 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn('Cloudflare documentation differs', r.read(self.out / 'drafts.json')['example']['reason'])
         self.assertEqual(r.import_reviews([entry()], client, self.out, True), {})
 
+    def test_http_repository_evidence_stays_draft_without_blocking_batch(self):
+        invalid = entry()
+        invalid['evidence']['metadata']['repository'] = 'http://example.org/project'
+        current = {'metadata': {'version': '1.0.0'}, 'documentation_sha256': r.sha('Launch an app'), 'evidence_hash': None, 'catalog_product_commit': 'a' * 40}
+        r.save(self.out / 'preview.json', {'example': current})
+        client = r.Client(self.out, 'token', lambda *_: self.fail('invalid evidence must not be sent'))
+        self.assertEqual(r.sync([invalid], {'product_commit': 'a' * 40}, client, self.out, True), {})
+        self.assertIn('repository URL is not HTTPS', r.read(self.out / 'drafts.json')['example']['reason'])
+
     def test_import_unknown_stays_draft_and_apply_required(self):
         r.save(self.out / 'sync-applied.json', {'example': {'status': 'synced', 'evidence_hash': 'b' * 64, 'product_commit': 'a' * 40}})
         client = r.Client(self.out, 'token', lambda *_: self.fail('preview must not import'))
@@ -148,8 +157,9 @@ class ReconcileTests(unittest.TestCase):
                 self.assertFalse(payload['dry_run'])
                 self.assertIsNone(payload['packages'][0]['expected_evidence_hash'])
                 return Response({'results': [{'package_name': 'example', 'status': 'synced', 'evidence_hash': 'b' * 64, 'product_commit': 'a' * 40}]})
-            self.assertEqual(set(json.loads(req.data)), set(r.FIELDS))
-            return Response({'status': 'reviewed'})
+            payload = json.loads(req.data)
+            self.assertEqual(set(payload['reviews'][0]), set(r.FIELDS))
+            return Response({'results': [{'package_name': 'example', 'status': 'reviewed'}]})
         client = r.Client(self.out, 'token', opener)
         r.sync([entry()], {'product_commit': 'a' * 40}, client, self.out, True)
         r.import_reviews([entry()], client, self.out, True)
@@ -157,6 +167,27 @@ class ReconcileTests(unittest.TestCase):
         r.import_reviews([entry()], client, self.out, True)
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(r.read(self.out / 'imported.json')), 1)
+
+    def test_import_batches_five_reviews_and_checkpoints_conflicts(self):
+        entries = []
+        bindings = {}
+        for index in range(6):
+            item = entry(); name = f'review_{index}'
+            item['package_name'] = name; item['record']['package_name'] = name
+            entries.append(item)
+            bindings[name] = {'status': 'synced', 'evidence_hash': 'b' * 64, 'product_commit': 'a' * 40}
+        r.save(self.out / 'sync-applied.json', bindings)
+        calls = []
+        class Client:
+            def request(self, path, payload, **_):
+                calls.append([review['package_name'] for review in payload['reviews']])
+                return {'results': [{'package_name': review['package_name'], 'status': 'conflict' if review['package_name'] == 'review_2' else 'reviewed', 'reason': 'Evidence conflict'} for review in payload['reviews']]}
+        imported = r.import_reviews(entries, Client(), self.out, True)
+        self.assertEqual([len(batch) for batch in calls], [5, 1])
+        self.assertEqual(len(imported), 5)
+        self.assertEqual(r.read(self.out / 'drafts.json')['review_2']['reason'], 'Evidence conflict')
+        r.import_reviews(entries, Client(), self.out, True)
+        self.assertEqual(len(calls), 2)
 
     def test_metrics_missing_cloudflare_uses_score_without_auth(self):
         calls = []

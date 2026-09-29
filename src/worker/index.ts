@@ -202,6 +202,7 @@ export default {
       "/api/v1/admin/competitors/policy/preview",
       "/api/v1/admin/competitors/evidence/sync",
       "/api/v1/admin/competitors/review/import",
+      "/api/v1/admin/competitors/review/import/batch",
     ]);
     const isRecoveryAdminPost = request.method === "POST" && recoveryAdminPosts.has(url.pathname);
     if (String(env.D1_WRITES_PAUSED) === "true" && !["GET", "HEAD", "OPTIONS"].includes(request.method) && !isRecoveryAdminPost) {

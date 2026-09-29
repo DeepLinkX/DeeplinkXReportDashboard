@@ -87,6 +87,7 @@ describe("temporary D1 write pause", () => {
       "/api/v1/admin/competitors/policy/preview",
       "/api/v1/admin/competitors/evidence/sync",
       "/api/v1/admin/competitors/review/import",
+      "/api/v1/admin/competitors/review/import/batch",
     ]) {
       const response = await worker.fetch(new Request(`https://test${path}`, {
         method: "POST",

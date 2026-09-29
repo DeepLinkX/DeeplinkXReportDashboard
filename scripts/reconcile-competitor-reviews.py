@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ORIGIN = 'https://deeplinkx-visibility.parham-dev.workers.dev'
@@ -285,6 +286,14 @@ def evidence_payload(entry, current, product_commit):
         sources = [{'url': url, 'sha256': sha(documentation) if documentation else digest(metadata), 'observed_at': observed, 'reason': 'Frozen normalized documentation' if documentation else 'Frozen normalized package metadata'}]
     normalized = {k: metadata.get(k) for k in ('name', 'version', 'published', 'description', 'topics', 'repository')}
     normalized.update(name=name, description=metadata.get('description') or '', topics=metadata.get('topics') or [], repository=metadata.get('repository') or None)
+    if normalized['repository']:
+        try:
+            repository = urllib.parse.urlsplit(normalized['repository'])
+            valid_repository = repository.scheme == 'https' and bool(repository.hostname) and not repository.username and not repository.password
+        except ValueError:
+            valid_repository = False
+        if not valid_repository:
+            return None, 'Frozen repository URL is not HTTPS; retain draft'
     return {'package_name': name, 'expected_evidence_hash': current.get('evidence_hash'), 'product_commit': product_commit, 'metadata': normalized, 'documentation': documentation, 'observed_at': observed, 'sources': sources[:20]}, None
 
 
@@ -336,11 +345,27 @@ def import_reviews(entries, client, out, apply=False):
         payload = {key: record.get(key) for key in FIELDS}
         payload.update(package_name=name, evidence_hash=binding['evidence_hash'], product_commit=binding['product_commit'])
         ready[name] = payload
-        if apply:
-            response = client.request(ADMIN + 'review/import', payload, protected=True)
-            imported[name] = {'at': now(), 'evidence_hash': payload['evidence_hash'], 'product_commit': payload['product_commit'], 'result': response}
-            save(Path(out) / 'imported.json', imported)
     save(Path(out) / 'import-ready.json', ready)
+    if apply:
+        pending = list(ready.items())
+        for start in range(0, len(pending), 5):
+            batch = pending[start:start + 5]
+            response = client.request(ADMIN + 'review/import/batch', {'reviews': [payload for _, payload in batch]}, protected=True)
+            results = response.get('results', [])
+            if {result.get('package_name') for result in results} != {name for name, _ in batch} or len(results) != len(batch):
+                raise PhaseStopped('Review batch response did not match its request; checkpoint retained')
+            conflicts = []
+            for result in results:
+                name = result['package_name']; payload = ready[name]
+                if result.get('status') == 'reviewed':
+                    imported[name] = {'at': now(), 'evidence_hash': payload['evidence_hash'], 'product_commit': payload['product_commit'], 'result': result}
+                elif result.get('status') == 'conflict':
+                    conflicts.append((name, result.get('reason') or 'Review import conflict'))
+                else:
+                    raise PhaseStopped('Review batch returned an unknown status; checkpoint retained')
+            save(Path(out) / 'imported.json', imported)
+            for name, reason in conflicts:
+                draft(out, name, reason)
     return imported if apply else ready
 
 

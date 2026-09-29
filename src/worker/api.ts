@@ -442,6 +442,31 @@ async function admin(
       return json({status:"reviewed"},{headers:{"cache-control":"no-store"}});
     } catch (error) {if(isD1DailyQuotaError(error)) throw error;return errorResponse(400,error instanceof Error?error.message:"Invalid review request.");}
   }
+  if (path === "/api/v1/admin/competitors/review/import/batch" && request.method === "POST") {
+    try {
+      const body = await bodyJson<{ reviews: Parameters<typeof importReview>[1][] }>(request);
+      if (!body || !Array.isArray(body.reviews)) return errorResponse(400, "reviews must be an array.");
+      packageNames(body.reviews.map(review => review?.package_name));
+      const results: Array<{ package_name: string; status: "reviewed" | "conflict"; reason?: string }> = [];
+      for (const review of body.reviews) {
+        try {
+          await importReview(env, review);
+          results.push({ package_name: review.package_name, status: "reviewed" });
+        } catch (error) {
+          if (isD1DailyQuotaError(error)) {
+            if (results.some(result => result.status === "reviewed")) await invalidate([MUTABLE_CACHE_TAG]);
+            throw error;
+          }
+          const reason = error instanceof Error ? error.message : "";
+          if (!["Review evidence is stale or unavailable.", "Unresolved decisions must remain drafts.",
+            "Invalid evidence-backed review decision.", "Review evidence changed concurrently; review the current evidence before importing."].includes(reason)) throw error;
+          results.push({ package_name: review.package_name, status: "conflict", reason });
+        }
+      }
+      if (results.some(result => result.status === "reviewed")) await invalidate([MUTABLE_CACHE_TAG]);
+      return json({ results }, { headers: { "cache-control": "no-store" } });
+    } catch (error) { if (isD1DailyQuotaError(error)) throw error; return errorResponse(400, error instanceof Error ? error.message : "Invalid review batch."); }
+  }
   if (path === "/api/v1/admin/runs" && request.method === "POST") {
     const body = await bodyJson<{ profile?: AuditProfile }>(request);
     if (body.profile !== "pulse" && body.profile !== "full") return errorResponse(400, "Profile must be pulse or full.");

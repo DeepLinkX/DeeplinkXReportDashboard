@@ -132,3 +132,25 @@ it('protects policy and evidence operations',async()=>{
     expect((await SELF.fetch(`https://test/api/v1/admin/competitors/${path}`,{method:'POST',body:'{}'})).status).toBe(401);
   }
 });
+
+it('imports a bounded review batch with per-package conflict results',async()=>{
+  const good = await evidence('review_batch_good');
+  const stale = await evidence('review_batch_stale');
+  const goodSync = await syncEvidence(env,{packages:[good],dry_run:false}) as {results:Array<{evidence_hash:string}>};
+  await syncEvidence(env,{packages:[stale],dry_run:false});
+  const reviews = [
+    {package_name:'review_batch_good',evidence_hash:goodSync.results[0].evidence_hash,product_commit:catalog.source_commit,reviewed_by:'test reviewer',decision:noise},
+    {package_name:'review_batch_stale',evidence_hash:'0'.repeat(64),product_commit:catalog.source_commit,reviewed_by:'test reviewer',decision:noise},
+  ];
+  const headers = {authorization:`Bearer ${env.ADMIN_TOKEN}`,'idempotency-key':'review-batch-test','content-type':'application/json'};
+  const response = await SELF.fetch('https://test/api/v1/admin/competitors/review/import/batch',{method:'POST',headers,body:JSON.stringify({reviews})});
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({results:[
+    {package_name:'review_batch_good',status:'reviewed'},
+    {package_name:'review_batch_stale',status:'conflict'},
+  ]});
+  expect(await env.DB.prepare("SELECT state FROM competitor_review_policies WHERE package_name='review_batch_good'").first()).toEqual({state:'confirmed_noise'});
+  expect(await env.DB.prepare("SELECT state FROM competitor_review_policies WHERE package_name='review_batch_stale'").first()).toBeNull();
+  const duplicate = await SELF.fetch('https://test/api/v1/admin/competitors/review/import/batch',{method:'POST',headers:{...headers,'idempotency-key':'review-batch-duplicate'},body:JSON.stringify({reviews:[reviews[0],reviews[0]]})});
+  expect(duplicate.status).toBe(400);
+});
