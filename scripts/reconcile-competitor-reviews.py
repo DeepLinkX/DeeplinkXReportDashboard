@@ -196,8 +196,17 @@ class Client:
             save(self.out / 'http-state.json', cooldown)
         try:
             opener = self.opener or (curl_open if url.startswith(ORIGIN + '/') else self.pubdev_opener)
-            with opener(req, timeout=60) as response:
-                result = json.loads(response.read(4_000_001))
+            for attempt in range(3 if body is None else 1):
+                try:
+                    with opener(req, timeout=60) as response:
+                        result = json.loads(response.read(4_000_001))
+                    break
+                except urllib.error.HTTPError:
+                    raise
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+                    if attempt == (2 if body is None else 0):
+                        raise
+                    time.sleep(1 << attempt)
         except urllib.error.HTTPError as exc:
             error_body = exc.read(20000).decode(errors='replace')
             exc.close()
@@ -348,8 +357,8 @@ def import_reviews(entries, client, out, apply=False):
     save(Path(out) / 'import-ready.json', ready)
     if apply:
         pending = list(ready.items())
-        for start in range(0, len(pending), 5):
-            batch = pending[start:start + 5]
+        for start in range(0, len(pending), 10):
+            batch = pending[start:start + 10]
             response = client.request(ADMIN + 'review/import/batch', {'reviews': [payload for _, payload in batch]}, protected=True)
             results = response.get('results', [])
             if {result.get('package_name') for result in results} != {name for name, _ in batch} or len(results) != len(batch):
@@ -383,24 +392,55 @@ def metric_pool(entries):
 
 def capture_metrics(entries, client, out, cloudflare_only=False):
     state = read(Path(out) / 'metrics.json', {})
-    for entry in metric_pool(entries):
+    pool = metric_pool(entries)
+    rows = {}
+    # The list API includes all score fields. Page through relevant rows once
+    # instead of issuing a package-detail request for every candidate.
+    if len(pool) >= 20 and any(entry['package_name'] not in state for entry in pool):
+        for relationship in ('direct', 'adjacent'):
+            page = 1
+            while True:
+                path = f'/api/v1/competitors?view=all&relationship={relationship}&limit=100&page={page}'
+                response = client.request(path)
+                items = response.get('competitors')
+                total = response.get('total')
+                if not isinstance(items, list) or not isinstance(total, int) or total < 0 or len(items) > 100:
+                    raise PhaseStopped('Invalid Cloudflare competitor page; checkpoint retained')
+                for item in items:
+                    if isinstance(item, dict) and isinstance(item.get('package_name'), str):
+                        rows[item['package_name']] = (item, ORIGIN + path)
+                if page * 100 >= total:
+                    break
+                page += 1
+                if page > 200:
+                    raise PhaseStopped('Cloudflare competitor pagination exceeded bound; checkpoint retained')
+    for entry in pool:
         name = entry['package_name']
         if name in state:
-            continue
-        detail = client.request('/api/v1/competitors/' + name, allow_missing=True)
-        package = detail.get('package', {})
-        values = {k: package.get(k) for k in METRICS}
-        observation = {'package_name': name, 'metrics': values, 'observed_at': package.get('metrics_captured_at'), 'captured_at': now(), 'source': ORIGIN + '/api/v1/competitors/' + name}
-        missing = [k for k, value in values.items() if value is None]
-        local = entry.get('metrics') or entry.get('evidence', {}).get('metrics') or entry.get('record', {}).get('metrics') or {}
-        local_observed = entry.get('metrics_observed_at') or entry.get('evidence', {}).get('metrics_captured_at') or entry.get('record', {}).get('metrics_captured_at')
-        local_used = {}
-        for key in list(missing):
-            value = local.get(key)
-            if value is not None:
-                values[key] = value; missing.remove(key); local_used[key] = value
-        if local_used:
-            observation['local_reuse'] = {'metrics': local_used, 'observed_at': local_observed, 'source': 'matching frozen review snapshot'}
+            observation = state[name]
+            if cloudflare_only or not observation.get('missing') or observation.get('supplement'):
+                continue
+            values = dict(observation['metrics'])
+            missing = list(observation['missing'])
+        else:
+            if name in rows:
+                package, source_url = rows[name]
+            else:
+                source_url = ORIGIN + '/api/v1/competitors/' + name
+                detail = client.request('/api/v1/competitors/' + name, allow_missing=True)
+                package = detail.get('package', {})
+            values = {k: package.get(k) for k in METRICS}
+            observation = {'package_name': name, 'metrics': values, 'observed_at': package.get('metrics_captured_at'), 'captured_at': now(), 'source': source_url}
+            missing = [k for k, value in values.items() if value is None]
+            local = entry.get('metrics') or entry.get('evidence', {}).get('metrics') or entry.get('record', {}).get('metrics') or {}
+            local_observed = entry.get('metrics_observed_at') or entry.get('evidence', {}).get('metrics_captured_at') or entry.get('record', {}).get('metrics_captured_at')
+            local_used = {}
+            for key in list(missing):
+                value = local.get(key)
+                if value is not None:
+                    values[key] = value; missing.remove(key); local_used[key] = value
+            if local_used:
+                observation['local_reuse'] = {'metrics': local_used, 'observed_at': local_observed, 'source': 'matching frozen review snapshot'}
         if missing and not cloudflare_only:
             reason = 'Cloudflare and matching local snapshot had no value for: ' + ', '.join(missing)
             observation['upstream_reason'] = reason
@@ -410,6 +450,7 @@ def capture_metrics(entries, client, out, cloudflare_only=False):
             observation['supplement'] = {'source': source, 'observed_at': client.last_captured_at, 'metrics': {k: mapped[k] for k in missing}}
             for k in missing:
                 values[k] = mapped[k]
+        observation['metrics'] = values
         observation['missing'] = [k for k, value in values.items() if value is None]
         state[name] = observation
         save(Path(out) / 'metrics.json', state)

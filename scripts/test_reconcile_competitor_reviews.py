@@ -171,7 +171,7 @@ class ReconcileTests(unittest.TestCase):
     def test_import_batches_five_reviews_and_checkpoints_conflicts(self):
         entries = []
         bindings = {}
-        for index in range(6):
+        for index in range(11):
             item = entry(); name = f'review_{index}'
             item['package_name'] = name; item['record']['package_name'] = name
             entries.append(item)
@@ -183,8 +183,8 @@ class ReconcileTests(unittest.TestCase):
                 calls.append([review['package_name'] for review in payload['reviews']])
                 return {'results': [{'package_name': review['package_name'], 'status': 'conflict' if review['package_name'] == 'review_2' else 'reviewed', 'reason': 'Evidence conflict'} for review in payload['reviews']]}
         imported = r.import_reviews(entries, Client(), self.out, True)
-        self.assertEqual([len(batch) for batch in calls], [5, 1])
-        self.assertEqual(len(imported), 5)
+        self.assertEqual([len(batch) for batch in calls], [10, 1])
+        self.assertEqual(len(imported), 10)
         self.assertEqual(r.read(self.out / 'drafts.json')['review_2']['reason'], 'Evidence conflict')
         r.import_reviews(entries, Client(), self.out, True)
         self.assertEqual(len(calls), 2)
@@ -202,6 +202,62 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(metrics['example']['metrics']['downloads_30d'], 9)
         self.assertEqual(metrics['example']['missing'], [])
         self.assertEqual(len(calls), 2)
+
+    def test_metrics_reuse_paginated_cloudflare_rows(self):
+        entries = []
+        for index in range(21):
+            item = entry(); item['package_name'] = f'example_{index:02d}'
+            entries.append(item)
+        calls = []
+        class Recording:
+            def request(self, path, **_):
+                calls.append(path)
+                if 'relationship=direct' in path:
+                    page = int(path.rsplit('page=', 1)[1])
+                    names = [f'example_{index:02d}' for index in range(20)] + [f'filler_{index:02d}' for index in range(80)] if page == 1 else ['example_20']
+                    return {'total': 101, 'competitors': [{'package_name': name, 'downloads_30d': 12, 'likes': 3, 'points': 150, 'max_points': 160, 'metrics_captured_at': '2026-09-20T00:00:00Z'} for name in names]}
+                if 'relationship=adjacent' in path:
+                    return {'total': 0, 'competitors': []}
+                raise AssertionError(f'Unexpected detail request: {path}')
+        result = r.capture_metrics(entries, Recording(), self.out, cloudflare_only=True)
+        self.assertEqual(len(result), 21)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all('view=all&relationship=' in path for path in calls))
+        self.assertTrue(all(row['metrics']['downloads_30d'] == 12 for row in result.values()))
+
+    def test_metrics_resume_fetches_only_missing_score(self):
+        r.save(self.out / 'metrics.json', {'example': {'package_name': 'example', 'metrics': {key: None for key in r.METRICS}, 'source': 'https://deeplinkx-visibility.parham-dev.workers.dev/api/v1/competitors/example', 'observed_at': None, 'missing': list(r.METRICS)}})
+        calls = []
+        class Recording:
+            last_captured_at = '2026-09-29T00:00:00Z'
+            def request(self, path, **_):
+                calls.append(path)
+                return {'downloadCount30Days': 9, 'likeCount': 4, 'grantedPoints': 160, 'maxPoints': 160}
+        result = r.capture_metrics([entry()], Recording(), self.out)
+        self.assertEqual(calls, ['https://pub.dev/api/packages/example/score'])
+        self.assertEqual(result['example']['missing'], [])
+        self.assertEqual(result['example']['metrics']['downloads_30d'], 9)
+
+    def test_metrics_resume_preserves_upstream_missing_fields(self):
+        saved = {'package_name': 'example', 'metrics': {key: None for key in r.METRICS}, 'source': 'Cloudflare', 'missing': list(r.METRICS), 'supplement': {'source': 'https://pub.dev/api/packages/example/score', 'observed_at': '2026-09-29T00:00:00Z'}}
+        r.save(self.out / 'metrics.json', {'example': saved})
+        class NoRequests:
+            def request(self, *_args, **_kwargs):
+                raise AssertionError('Already attempted missing score must be reused')
+        self.assertEqual(r.capture_metrics([entry()], NoRequests(), self.out)['example'], saved)
+
+    def test_read_only_request_retries_transient_network_error(self):
+        attempts = []
+        def opener(req, **_):
+            attempts.append(req.full_url)
+            if len(attempts) < 3:
+                raise urllib.error.URLError('temporary connection failure')
+            return Response({'ok': True})
+        with patch.object(r.time, 'sleep') as sleep:
+            value = r.Client(self.out, opener=opener).request('/api/v1/health')
+        self.assertEqual(value, {'ok': True})
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
 
 
     def test_confirmed_noise_is_never_in_metric_pool_or_requested(self):
