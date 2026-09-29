@@ -80,6 +80,29 @@ describe("temporary D1 write pause", () => {
     expect((f.env.DB as unknown as { prepare: ReturnType<typeof vi.fn> }).prepare).not.toHaveBeenCalled();
   });
 
+  it("allows only protected review reconciliation posts through the HTTP pause gate", async () => {
+    const f = fixture({ kind: "intelligence", jobId: "paused-job" });
+    (f.env as Env).D1_WRITES_PAUSED = "true";
+    for (const path of [
+      "/api/v1/admin/competitors/policy/preview",
+      "/api/v1/admin/competitors/evidence/sync",
+      "/api/v1/admin/competitors/review/import",
+    ]) {
+      const response = await worker.fetch(new Request(`https://test${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ packages: ["sample_package"] }),
+      }), f.env, {} as ExecutionContext);
+      expect(response.status, path).toBe(401);
+      expect(await response.json()).toMatchObject({ error: "Unauthorized." });
+    }
+    const ordinaryWrite = await worker.fetch(new Request("https://test/api/v1/admin/runs", {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    }), f.env, {} as ExecutionContext);
+    expect(ordinaryWrite.status).toBe(503);
+    expect((f.env.DB as unknown as { prepare: ReturnType<typeof vi.fn> }).prepare).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["deeplinkx-visibility-scan", { kind: "scan-query", runId: "paused-run", queryId: "paused-query" }],
     ["deeplinkx-visibility-dlq", { kind: "scan-query", runId: "paused-run", queryId: "paused-query" }],

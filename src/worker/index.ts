@@ -197,10 +197,17 @@ async function deferPubdev(message: Message<AuditQueueMessage>, env: Env, error:
 
 export default {
   async fetch(request, env, context): Promise<Response> {
-    if (String(env.D1_WRITES_PAUSED) === "true" && !["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+    const url = new URL(request.url);
+    const recoveryAdminPosts = new Set([
+      "/api/v1/admin/competitors/policy/preview",
+      "/api/v1/admin/competitors/evidence/sync",
+      "/api/v1/admin/competitors/review/import",
+    ]);
+    const isRecoveryAdminPost = request.method === "POST" && recoveryAdminPosts.has(url.pathname);
+    if (String(env.D1_WRITES_PAUSED) === "true" && !["GET", "HEAD", "OPTIONS"].includes(request.method) && !isRecoveryAdminPost) {
       return new Response(JSON.stringify({
         error: "database_read_only",
-        message: "Writes are temporarily paused during database recovery.",
+        message: "Writes are temporarily paused during database recovery. Only authenticated review reconciliation is enabled.",
       }), {
         status: 503,
         headers: {
@@ -210,7 +217,6 @@ export default {
         },
       });
     }
-    const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
       const publicRequest = canonicalPublicRequest(request);
       if (publicRequest) return context.exports.PublicAPI.fetch(publicRequest);
