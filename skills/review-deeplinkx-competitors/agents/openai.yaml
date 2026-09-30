@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review DeeplinkX Competitors"
+  short_description: "Review package evidence with Cloudflare-first reuse"
+  default_prompt: "Use $review-deeplinkx-competitors to resume unfinished Cloudflare review questions, reuse existing evidence, exclude confirmed noise, and produce a Cloudflare-hosted competitor report."

@@ -38,6 +38,7 @@ async function capturedFetch(env: Env, url: string, purpose: string, attempts: n
   let response: Response;
   try { response = await fetch(url, { headers: { accept: purpose.includes("readme") ? "text/html" : "application/json", "user-agent": "deeplinkx-visibility/2.0" }, signal: AbortSignal.timeout(25_000) }); }
   catch { throw new RetryableCompetitorError("Upstream request failed or timed out.", retryDelay(null, attempts), "intelligence-network"); }
+  if (response.status === 403) { await response.body?.cancel(); await recordPubdevThrottle(env,43200,response); throw new PubdevDeferredError(43200); }
   if (response.status === 429 || response.status >= 500) {
     await response.body?.cancel();
     if (response.status === 429) await recordPubdevThrottle(env,retryDelay(response,attempts),response);
@@ -76,7 +77,7 @@ export async function refreshPackage(env: Env, name: string, attempts = 1, runId
     return directoryPackage({...row, analysis_json:JSON.stringify(priorPolicy.decision),relationship:"noise",processing_status:"skipped_noise"});
   }
   const url = `https://pub.dev/api/packages/${name}`;
-  if (!fresh(row.metadata_captured_at, 7)) {
+  if (!fresh(row.metadata_captured_at, 30)) {
     try {
       const payload = upstreamJson(await capturedFetch(env, url, `competitor-metadata:${name}`, attempts, runId), attempts);
       if (payload.name !== name || !payload.latest?.version || !payload.latest.pubspec) throw new Error("Invalid package metadata shape.");
@@ -96,7 +97,7 @@ export async function refreshPackage(env: Env, name: string, attempts = 1, runId
   const preliminary = { name, description: metadata.description, topics: metadata.topics, source_url: url };
   priorPolicy = await applicablePolicy(env, row, catalog.source_commit);
   const likely = plausibleOutbound(preliminary) || discovery.seeds.includes(name);
-  if (!priorPolicy.decision && likely && (!row.documentation_text || row.documentation_version !== metadata.version)) {
+  if (!priorPolicy.decision && !priorPolicy.policy && likely && (!row.documentation_text || row.documentation_version !== metadata.version)) {
     try {
       const documentUrl = `https://pub.dev/packages/${name}/versions/${encodeURIComponent(metadata.version!)}`;
       const text = readmeText(await capturedFetch(env, documentUrl, `competitor-readme:${name}`, attempts, runId));
@@ -106,6 +107,13 @@ export async function refreshPackage(env: Env, name: string, attempts = 1, runId
         .bind(text, metadata.version, stamp, stamp, name).run();
       row = { ...row, documentation_text: text, documentation_version: metadata.version, documentation_captured_at: stamp, documentation_error: null };
     } catch (error) { await stageError(env, name, "documentation", error); }
+  }
+  if(priorPolicy.policy?.state !== 'confirmed_noise' && metadata.version) {
+    const baseline=priorPolicy.policy?JSON.parse(priorPolicy.policy.metadata_json).version:null;
+    if(baseline && baseline!==metadata.version) {
+      const {recordObservedUpdate}=await import('./review-operations.js');
+      await recordObservedUpdate(env,name,baseline,metadata.version);
+    }
   }
   // Never apply an old release's README to a newly published release.
   const documentation = row.documentation_version === metadata.version ? String(row.documentation_text ?? "") : "";
@@ -119,8 +127,8 @@ export async function refreshPackage(env: Env, name: string, attempts = 1, runId
       .bind(name, hash, catalog.source_commit).first<{ decision_json: string }>();
     if (review) analysis = { ...JSON.parse(review.decision_json) as PackageAnalysis, review_status: "reviewed" };
   }
-  const needsMetrics = !fresh(row.metrics_captured_at, 7) || Boolean(metricsNotBefore && String(row.metrics_captured_at ?? "") < metricsNotBefore);
-  const metricsEligible = analysis.relationship === "direct" || analysis.relationship === "adjacent" || (selectedUnresolved && analysis.relationship === "unknown");
+  const needsMetrics = !fresh(row.metrics_captured_at, 30);
+  const metricsEligible = policy.policy?.state !== "reopened" && (analysis.relationship === "direct" || analysis.relationship === "adjacent" || (selectedUnresolved && analysis.relationship === "unknown"));
   if (metricsEligible && needsMetrics) {
     try {
       const payload = upstreamJson(await capturedFetch(env, `${url}/score`, `competitor-score:${name}`, attempts, runId), attempts);
@@ -284,24 +292,26 @@ export async function startPackageRefresh(env: Env, key: string, names: string[]
 
 export async function startIntelligence(env: Env, key: string, runId?: string, full = true): Promise<unknown> {
   const stamp = now();
-  // Historical discoveries are facts about their original date, not new searches.
-  await env.DB.prepare(`INSERT OR IGNORE INTO competitor_registry(package_name,first_seen_at,last_seen_at,updated_at)
-    SELECT c.package_name,MIN(r.created_at),MAX(r.created_at),? FROM competitors c JOIN runs r ON r.id=c.run_id GROUP BY c.package_name`).bind(stamp).run();
-  await env.DB.prepare(`INSERT OR IGNORE INTO competitor_discoveries(package_name,source_key,run_id,query_id,query,position,depth,captured_at,source_url)
-    SELECT sp.package_name,sp.run_id||':'||sp.query_id,sp.run_id,sp.query_id,rq.query,sp.position,rq.requested_depth,COALESCE(rq.completed_at,r.created_at),
-    'https://pub.dev/packages?q='||replace(rq.query,' ','%20') FROM search_positions sp
-    JOIN competitor_registry cr ON cr.package_name=sp.package_name JOIN run_queries rq ON rq.run_id=sp.run_id AND rq.query_id=sp.query_id JOIN runs r ON r.id=sp.run_id`).run();
-  for (const seed of discovery.seeds) {
+  // Register only the current run; explicit backfills own historical replay.
+  if(runId) {
+    await env.DB.prepare(`INSERT OR IGNORE INTO competitor_registry(package_name,first_seen_at,last_seen_at,updated_at)
+      SELECT DISTINCT package_name,?,?,? FROM competitors WHERE run_id=?`).bind(stamp,stamp,stamp,runId).run();
+    await env.DB.prepare(`INSERT OR IGNORE INTO competitor_discoveries(package_name,source_key,run_id,query_id,query,position,depth,captured_at,source_url)
+      SELECT sp.package_name,sp.run_id||':'||sp.query_id,sp.run_id,sp.query_id,rq.query,sp.position,rq.requested_depth,COALESCE(rq.completed_at,?),
+      'https://pub.dev/packages?q='||replace(rq.query,' ','%20') FROM search_positions sp JOIN run_queries rq ON rq.run_id=sp.run_id AND rq.query_id=sp.query_id
+      JOIN competitor_registry cr ON cr.package_name=sp.package_name WHERE sp.run_id=?`).bind(stamp,runId).run();
+  }
+  for (const seed of full ? discovery.seeds : []) {
     await registerPackage(env, seed);
     await env.DB.prepare("INSERT OR IGNORE INTO competitor_discoveries(package_name,source_key,captured_at,source_url) VALUES(?,?,?,?)")
       .bind(seed,`seed:${seed}`,stamp,`https://pub.dev/packages/${seed}`).run();
   }
   const condition = full
-    ? `WHERE NOT ${unchangedNoiseSql()} AND NOT EXISTS (SELECT 1 FROM competitor_classifications cc WHERE cc.package_name=cr.package_name AND cc.run_id=?)`
-    : `WHERE NOT ${unchangedNoiseSql()} AND relationship IN ('direct','adjacent')`;
+    ? `WHERE NOT ${unchangedNoiseSql()} AND (? IS NULL OR EXISTS (SELECT 1 FROM competitor_discoveries cd WHERE cd.package_name=cr.package_name AND cd.run_id=?) OR cr.package_name IN (SELECT value FROM json_each(?))) AND NOT EXISTS (SELECT 1 FROM competitor_classifications cc WHERE cc.package_name=cr.package_name AND cc.run_id=?)`
+    : `WHERE NOT ${unchangedNoiseSql()} AND relationship IN ('direct','adjacent') AND (metrics_captured_at IS NULL OR metrics_captured_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days'))`;
   const insert = env.DB.prepare(`INSERT OR IGNORE INTO intelligence_jobs(id,run_id,kind,subject,created_at,updated_at)
     SELECT ?||':package:'||package_name,?,'package',package_name,?,? FROM competitor_registry cr ${condition}`);
-  await (full ? insert.bind(key,runId??null,stamp,stamp,runId??null) : insert.bind(`${key}:metrics`,runId??null,stamp,stamp)).run();
+  await (full ? insert.bind(key,runId??null,stamp,stamp,runId??null,runId??null,JSON.stringify(discovery.seeds),runId??null) : insert.bind(`${key}:metrics`,runId??null,stamp,stamp)).run();
   if (!full) {
     // Deterministic bounded unresolved pool; existing score values alone never admit noise.
     await env.DB.prepare(`INSERT OR IGNORE INTO intelligence_jobs(id,run_id,kind,subject,created_at,updated_at)
@@ -344,6 +354,11 @@ export async function processIntelligenceJob(env: Env, jobId: string, attempts: 
     if (planned.results.length===100) await env.SCAN_QUEUE.send({kind:"intelligence",jobId});
     else await env.DB.prepare("UPDATE intelligence_jobs SET status='complete',updated_at=? WHERE id=?").bind(now(),jobId).run();
     return;
+  }
+  if (job.kind === "package" && job.id.includes(":metrics:package:")) {
+    const {scheduleRoutineMetrics}=await import('./review-operations.js');
+    await scheduleRoutineMetrics(env,job.run_id??job.id.split(':metrics:')[0],job.subject);
+    await env.DB.prepare("UPDATE intelligence_jobs SET status='complete',outcome='metrics_delegated',updated_at=? WHERE id=?").bind(now(),jobId).run();return;
   }
   if (job.kind === "package") {
     const result = await refreshPackage(env,job.subject,attempts,job.run_id??undefined,job.id.includes(":metrics:package:") || job.id.includes(":unresolved:package:") ? job.created_at : undefined,job.id.includes(":unresolved:package:"));

@@ -27,8 +27,8 @@
     "catalog": "tsx scripts/generate-catalog.ts",
     "migrate:legacy": "tsx scripts/migrate-legacy.ts",
     "deploy": "npm run build:dashboard && wrangler deploy",
-    "db:migrate:local": "wrangler d1 migrations apply deeplinkx-visibility --local",
-    "db:migrate:remote": "wrangler d1 migrations apply deeplinkx-visibility --remote"
+    "db:migrate:local": "wrangler d1 migrations apply deeplinkx-visibility-v2 --local",
+    "db:migrate:remote": "wrangler d1 migrations apply deeplinkx-visibility-v2 --remote"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

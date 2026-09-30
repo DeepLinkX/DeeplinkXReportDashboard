@@ -23,3 +23,6 @@ diagnostics/
 *.sqlite
 *.sqlite3
 !migrations/*.sql
+
+__pycache__/
+*.py[cod]

@@ -361,7 +361,7 @@ The deterministic `capabilities-v2.4` classifier records multiple provider/actio
 
 ### Refresh, expansion discovery, and review
 
-Complete full reports trigger registry import, all-candidate classification, and supplemental discovery. Complete pulse reports refresh the relevant directory plus selected review candidates. Eligible metadata and score resources are shared for seven days. Usable README evidence is reused for its recorded version regardless of age. Each successful resource is checkpointed before the next request; all outbound requests in the enrichment/discovery pipeline are sequential and honor `Retry-After`. Semantic evidence and scope changes reopen reviewed decisions. Product or mapping-policy changes invalidate affected relevant comparisons; they do not reopen unchanged confirmed noise.
+Complete full reports trigger registry import, all-candidate classification, and supplemental discovery. Complete pulse reports refresh the relevant directory plus selected review candidates. Eligible metadata and score resources are shared for thirty days; routine score refresh does not fetch metadata or documentation. Usable README evidence is reused for its recorded version regardless of age. Each successful resource is checkpointed before the next request; all outbound requests in the enrichment/discovery pipeline are sequential and honor `Retry-After`. Semantic evidence and scope changes reopen reviewed decisions. Product or mapping-policy changes invalidate affected relevant comparisons; they do not reopen unchanged confirmed noise.
 
 Each pulse or explicit metrics refresh captures a score observation after its job was created, even when the previous score is less than seven days old. Retries reuse a successful observation from that same job; monthly discovery reuses fresh weekly metrics.
 
@@ -391,7 +391,7 @@ After a deployment, synchronize the committed catalog from GitHub main and check
 
 Migration `0006_competitor_review_policy.sql` persists reviewed scope, semantic identity, provenance, reopening state, and processing outcomes. Only evidence-backed reviewed noise is a confirmed exclusion; automatic noise remains provisional. Confirmed noise receives no scheduled metadata, README, score, semantic review, or random sampling. Full/pulse admission, supplemental discovery, seeds, backfills, retries, and stale queued jobs apply the exclusion. Name-only discoveries remain recorded, and reusable decisions contribute to per-run classification totals. Existing metrics retain their timestamps; skipping collection is not a failure.
 
-Observed package-version or semantic evidence changes, review-scope changes, or explicit maintainer reopening enter pending review. Downloads, likes, timestamps, repeated appearances, release age, seed membership, classifier versions, and product commits do not reopen confirmed noise. Ordinary refresh cannot bypass an exclusion. Non-noise direct/adjacent packages qualify for metrics; pulse additionally selects at most 100 unresolved candidates using capability evidence, uncertainty, recorded downloads (missing last), and name. Newly classified noise never requests scores. Reviewed decisions are resolved before metric eligibility.
+Already-observed material capability/purpose contradictions, review-scope changes, or explicit maintainer reopening enter pending review. Version-number changes alone do not reopen confirmed noise. Downloads, likes, timestamps, repeated appearances, release age, seed membership, classifier versions, and product commits do not reopen confirmed noise. Ordinary refresh cannot bypass an exclusion. Non-noise direct/adjacent packages qualify for metrics; pulse additionally selects at most 100 unresolved candidates using capability evidence, uncertainty, recorded downloads (missing last), and name. Newly classified noise never requests scores. Reviewed decisions are resolved before metric eligibility.
 
 Protected POST operations require bearer authorization and an `Idempotency-Key`:
 
@@ -404,3 +404,37 @@ Protected POST operations require bearer authorization and an `Idempotency-Key`:
 The existing five-field review-import contract remains unchanged. For checkpointed bulk reconciliation, `/api/v1/admin/competitors/review/import/batch` accepts 1–10 `reviews` using that same five-field shape and returns a result for each package. Reconcile evidence first, then import only decisions supporting the exact returned evidence hash and product commit. Unknown, stale, conflicting, and unbound decisions stay local drafts. Evidence synchronization alone does not approve a review. Public package details add processing status and policy state without removing existing fields.
 
 Keep frozen snapshots, local review ledgers, reconciliation checkpoints, metrics, usage records, and reports outside both repositories. On quota exhaustion stop the current collection phase and resume from its checkpoint after reset; do not repeat the failing operation for every package. Back up D1 externally before applying migrations, verify the backup, then deploy the tested commit. Validate with a bounded representative refresh, not another full search audit. Immutable exports remain unchanged by evidence sync and review imports.
+
+## Cloudflare-owned competitor review
+
+The `/api/v1/admin/competitors/review-operations` protected API owns review membership,
+questions, leases, resources, decisions, counters, and Markdown/JSON/CSV artifacts.
+Migration `0009` is additive. Existing search report exports are never overwritten.
+The versioned skill lives in `skills/review-deeplinkx-competitors`; install/update it
+by copying that directory to `~/.codex/skills/review-deeplinkx-competitors`.
+See its `references/cloudflare-workflow.md` for executable client and payload examples.
+
+Start is idempotent, applying classifications is disabled by default, bootstrap accepts
+at most ten legacy records, and claim returns at most five distinct packages under
+thirty-minute leases. Existing five-field review imports retain evidence-hash and
+committed-product checks. Noise is accounted for without metadata, documentation,
+version, changelog, score, or review requests. Version-only changes do not reopen noise.
+Known relevant updates inspect changelog additions, keeping the reviewed baseline.
+
+Routine score work runs separately from metadata/README refresh and refreshes at most
+once every thirty days. Closeout operations reuse stored observations with original
+dates. Missing fields remain null; valid partial score responses are not repeatedly
+fetched. Routine discovery registers only the current run, not all historical ranks.
+
+One sequential resource dispatcher owns each phase. Captured successful bodies survive
+crash/resume; durable D1 membership survives queue loss. Resource failures have three
+transient attempts, Retry-After cooldowns, and a global twelve-hour 403 probe interval.
+After seventy-two hours of persistent denial resources become explicitly unavailable.
+Human review operations stop on D1 quota by default and require an explicitly authorized
+`finalize` request with `{"resume":true}`; scheduled routine operations may defer until
+UTC reset. There is no 20,000-row operational cap. No recurring LLM calls are made.
+
+Completed review-operation artifacts are immutable and stored in bounded UTF-8 chunks;
+normalized evidence, review provenance, and metrics remain available independently of
+raw-response retention. Local snapshots and ledgers are optional offline recovery only.
+Do not create a full database export or repeat snapshot import to resume a review.

@@ -137,12 +137,12 @@ export function analyzePackage(input: AnalysisEvidence, inventory: ProductCapabi
 }
 
 /** Extract only the published README, excluding dependency lists and sidebar search noise. */
-export function readmeText(html: string): string {
+export function readmeText(html: string, limit = 16000): string {
   const start = html.search(/<(?:section|div)[^>]*class="[^"]*(?:detail-tab-readme|markdown-body)[^"]*"/i);
   if (start < 0) throw new Error("Published README container was not found.");
   const section = html.slice(html.indexOf(">", start) + 1).split(/<\/section>/i)[0];
   return section.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
     .replace(/<\/(?:p|li|h[1-6]|pre|div)>/gi, "\n").replace(/<[^>]+>/g, " ")
     .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g, (entity) => ({ "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" })[entity] ?? " ")
-    .replace(/[ \t]+/g, " ").slice(0, 16000).trim();
+    .replace(/[ \t]+/g, " ").slice(0, limit).trim();
 }

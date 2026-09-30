@@ -1,3 +1,4 @@
+import { handleReviewOperations } from "./review-operations.js";
 import { packageNames, policyPreview, processingCounters, syncEvidence } from "./evidence-sync.js";
 import { loadReportArtifactContent } from "./artifacts.js";
 import { reopenReview } from "./review-policy.js";
@@ -394,8 +395,13 @@ async function admin(
   invalidate: InvalidatePublicCache,
 ): Promise<Response> {
   if (!await authorize(request, env)) return errorResponse(401, "Unauthorized.");
-  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
-  if (!idempotencyKey || idempotencyKey.length > 200) return errorResponse(400, "A bounded Idempotency-Key header is required.");
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
+  if ((request.method !== "GET" && !idempotencyKey) || (idempotencyKey && idempotencyKey.length > 200)) return errorResponse(400, "A bounded Idempotency-Key header is required.");
+  if (path === "/api/v1/admin/competitors/review-operations" || path.startsWith("/api/v1/admin/competitors/review-operations/")) {
+    const response = await handleReviewOperations(request,env,path,idempotencyKey ?? "read");
+    if(request.method === "POST" && /\/(bootstrap|results)$/.test(path)) await invalidate([MUTABLE_CACHE_TAG]);
+    return response;
+  }
   if (request.method === "POST" && ["/api/v1/admin/competitors/policy/preview","/api/v1/admin/competitors/policy/reopen","/api/v1/admin/competitors/evidence/sync","/api/v1/admin/competitors/processing"].includes(path)) {
     try {
       let result: unknown;

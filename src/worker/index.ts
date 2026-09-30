@@ -1,3 +1,4 @@
+import { processReviewResource, processReviewDispatch, materializeReviewReport } from "./review-operations.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { AuditQueueMessage } from "../shared/types.js";
 import { handlePublicApi, handleUncachedApi } from "./api.js";
@@ -69,6 +70,18 @@ async function handleQueueMessage(
   env: Env,
   context: ExecutionContext,
 ): Promise<void> {
+  if(message.body.kind === "review-resource" || message.body.kind === "review-finalize" || message.body.kind === "review-dispatch") {
+    if(message.body.kind === "review-dispatch") {
+      try {await processReviewDispatch(env,message.body.operationId);}
+      catch(error){if(isD1DailyQuotaError(error))throw error;if(await deferPubdev(message,env,error))return;throw error;}
+      await invalidatePublicCache(context,env,[MUTABLE_CACHE_TAG]);
+    } else if(message.body.kind === "review-resource") {
+      try { await processReviewResource(env,message.body.operationId,message.body.packageName,message.body.resourceKind,message.body.version); }
+      catch(error) { if(isD1DailyQuotaError(error))throw error; if(await deferPubdev(message,env,error))return; throw error; }
+      await invalidatePublicCache(context,env,[MUTABLE_CACHE_TAG]);
+    } else await materializeReviewReport(env,message.body.operationId);
+    message.ack();return;
+  }
   if (message.body.kind === "start-operation") {
     try {
       await executeStartup(env,message.body);
@@ -251,6 +264,11 @@ export default {
         if (batch.queue === "deeplinkx-visibility-dlq") {
           try {
             const detail = `Exhausted Queue retries after ${message.attempts} attempts.`;
+            if (message.body.kind === "review-resource" || message.body.kind === "review-finalize" || message.body.kind === "review-dispatch") {
+              // D1 remains the durable source; a later operation resume can redispatch.
+              await env.DB.prepare("UPDATE review_operations SET status='blocked' WHERE id=?").bind(message.body.operationId).run();
+              message.ack();continue;
+            }
             if (message.body.kind === "start-operation") {
               await failStartup(env,message.body,new Error(detail));
               message.ack();
@@ -297,6 +315,11 @@ export default {
         await handleQueueMessage(message, env, context);
       } catch (error) {
         if (!isD1DailyQuotaError(error)) throw error;
+        if((message.body.kind === "review-dispatch" || message.body.kind === "review-finalize") && message.body.stopOnQuota) {
+          // Human-requested closeouts stop here; D1 membership survives for explicit resume.
+          console.warn(JSON.stringify({code:"review-d1-quota-manual-stop",operation_id:message.body.operationId}));
+          message.ack();return;
+        }
         const delaySeconds = quotaResetDelay();
         // D1 cannot even store diagnostics at its daily limit. Preserve the
         // original job in Queue without consuming retries or fabricating dates.

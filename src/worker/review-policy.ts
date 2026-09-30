@@ -26,13 +26,25 @@ export async function semanticFingerprint(row: EvidenceRow): Promise<string> {
 
 /** Name-only rediscovery never changes this predicate. No score/age/classifier fields participate. */
 export const unchangedNoiseSql = (alias = 'cr') => `EXISTS (SELECT 1 FROM competitor_review_policies rp
- WHERE rp.package_name=${alias}.package_name AND rp.state='confirmed_noise' AND rp.scope='${REVIEW_SCOPE}'
- AND json_extract(rp.metadata_json,'$.version') IS json_extract(${alias}.metadata_json,'$.version')
- AND json_extract(rp.metadata_json,'$.description') IS json_extract(${alias}.metadata_json,'$.description')
- AND COALESCE((SELECT json_group_array(value ORDER BY value) FROM json_each(COALESCE(json_extract(rp.metadata_json,'$.topics'),'[]'))),'[]')
-     =COALESCE((SELECT json_group_array(value ORDER BY value) FROM json_each(COALESCE(json_extract(${alias}.metadata_json,'$.topics'),'[]'))),'[]')
- AND json_extract(rp.metadata_json,'$.repository') IS json_extract(${alias}.metadata_json,'$.repository')
- AND rp.documentation_text=CASE WHEN ${alias}.documentation_version=json_extract(${alias}.metadata_json,'$.version') THEN COALESCE(${alias}.documentation_text,'') ELSE '' END)`;
+ WHERE rp.package_name=${alias}.package_name AND rp.state='confirmed_noise' AND rp.scope='${REVIEW_SCOPE}')`;
+
+/** Missing/new-version documents and version bookkeeping are not material behavior. */
+export function observedBehaviorChanged(policy: ReviewPolicy, row: EvidenceRow): boolean {
+ const before=JSON.parse(policy.metadata_json || '{}');
+ const after=JSON.parse(String(row.metadata_json || '{}'));
+ const normalize=(text:string)=>text.replace(/\s+/g,' ').trim();
+ const oldDoc=normalize(policy.documentation_text).replaceAll(String(before.version??'__none__'),'<version>');
+ const currentDoc=storedDocumentation(row);
+ const newDoc=normalize(currentDoc).replaceAll(String(after.version??'__none__'),'<version>');
+ if(policy.state==='confirmed_noise') {
+  const action=/\b(?:launch|open|share|send|construct|build|check)\b[^.!?\n]{0,100}\b(?:external\s+apps?|whatsapp|telegram|tiktok|installed\s+apps?|app\s+store|play\s+store|url\s+schemes?)\b|\b(?:external\s+apps?|whatsapp|telegram)\b[^.!?\n]{0,70}\b(?:sharing|launching|availability|installation)\b/i;
+  const newClaim=(oldText:string,newText:string)=>newText.split(/[.!?\n]/).some(sentence=>action.test(sentence)&&!oldText.includes(sentence.trim())&&!/lockfile|info\.plist|inspir(?:ation|ed)|share\s+(?:this\s+)?(?:repository|project)/i.test(sentence));
+  return (before.description!==after.description && newClaim(before.description??'',after.description??'')) || Boolean(currentDoc && oldDoc!==newDoc && newClaim(oldDoc,newDoc));
+ }
+ return normalize(before.description??'')!==normalize(after.description??'') ||
+  stableJson([...(before.topics??[])].sort())!==stableJson([...(after.topics??[])].sort()) ||
+  before.repository!==after.repository || Boolean(currentDoc && oldDoc!==newDoc);
+}
 
 export async function policyFor(env: Env, name: string): Promise<ReviewPolicy | null> {
   return env.DB.prepare('SELECT * FROM competitor_review_policies WHERE package_name=?').bind(name).first<ReviewPolicy>();
@@ -41,7 +53,7 @@ export async function policyFor(env: Env, name: string): Promise<ReviewPolicy | 
 export async function applicablePolicy(env: Env, row: EvidenceRow, productCommit: string): Promise<{ policy: ReviewPolicy | null; decision: PackageAnalysis | null; skippedNoise: boolean }> {
   const policy = await policyFor(env, String(row.package_name));
   if (!policy || policy.state === 'reopened') return { policy, decision: null, skippedNoise: false };
-  const changed = policy.scope !== REVIEW_SCOPE || policy.semantic_fingerprint !== await semanticFingerprint(row);
+  const changed = policy.scope !== REVIEW_SCOPE || observedBehaviorChanged(policy,row);
   if (changed) {
     await env.DB.prepare("UPDATE competitor_review_policies SET state='reopened',reopened_at=?,reopen_reason='Observed semantic evidence or scope changed' WHERE package_name=? AND state!='reopened'")
       .bind(new Date().toISOString(), row.package_name).run();
