@@ -74,6 +74,9 @@ it('cloudflare-only records gaps and makes zero upstream requests',async()=>{
  await seed('op_only');const o=await op('only',{evidence_mode:'cloudflare_only'});await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_only'}]});
  const fetcher=vi.spyOn(globalThis,'fetch');await scheduleReviewResource(env,o.id,'op_only','metrics');
  expect(fetcher).not.toHaveBeenCalled();expect((await reviewOperationStatus(env,o.id) as any).counters.resources_unavailable).toBe(1);
+ vi.spyOn(env.SCAN_QUEUE,'send').mockResolvedValue(undefined);await finalizeReviewOperation(env,o.id,{});await materializeReviewReport(env,o.id);
+ const report=await handleReviewOperations(new Request(`https://test/api/v1/admin/competitors/review-operations/${o.id}/report?format=json`),env,`/api/v1/admin/competitors/review-operations/${o.id}/report`,'read');
+ expect((await report.json() as any).resource_outcomes[0].error).toBe('Cloudflare-only mode');
 });
 it('a 403 records an operation-wide cooldown instead of exhausting every package',async()=>{
  await seed('op_denied');const o=await op('denied');await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_denied'}]});vi.spyOn(env.SCAN_QUEUE,'send').mockResolvedValue(undefined);await scheduleReviewResource(env,o.id,'op_denied','metrics');
@@ -158,4 +161,13 @@ it('bounds metric admission to twenty packages and returns the remaining cursor'
  const o=await op('metric-pages',{package_names:names,expected_packages:21});
  const first=await finalizeReviewOperation(env,o.id,{collect_metrics:true}) as any;expect(first.scheduled).toBe(20);expect(first.done).toBe(false);
  const last=await finalizeReviewOperation(env,o.id,{collect_metrics:true,cursor:first.cursor}) as any;expect(last.scheduled).toBe(1);expect(last.done).toBe(true);
+});
+
+it('exports every resource across prefix-sensitive cursor pages',async()=>{
+ const o=await op('resource-pages');const names=Array.from({length:101},(_,i)=>`prefix${i}`);
+ await env.DB.prepare("INSERT INTO review_operation_packages(operation_id,package_name,disposition,relationship,updated_at) SELECT ?,value,'reviewed','adjacent','2026' FROM json_each(?)").bind(o.id,JSON.stringify(names)).run();
+ await env.DB.prepare("INSERT INTO review_operation_resources(operation_id,package_name,kind,status,error) SELECT ?,value,'metrics','unavailable','Fixture gap' FROM json_each(?)").bind(o.id,JSON.stringify(names)).run();
+ await materializeReviewReport(env,o.id);
+ const response=await handleReviewOperations(new Request(`https://test/api/v1/admin/competitors/review-operations/${o.id}/report?format=json`),env,`/api/v1/admin/competitors/review-operations/${o.id}/report`,'read');
+ const report=await response.json() as any;expect(report.resource_outcomes).toHaveLength(101);expect(new Set(report.resource_outcomes.map((r:any)=>r.package_name)).size).toBe(101);
 });

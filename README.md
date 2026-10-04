@@ -454,3 +454,7 @@ for the maintainer connection; TLS verification and authorization remain require
 
 Review metric admission uses twenty-package cursor pages to bound queries per Worker
 invocation. This is separate from the daily row quota and preserves resource reuse.
+
+Operation status exposes up to five current resource blockers. Completed review
+reports include per-resource unavailable reasons and missing fields without raw
+response bodies, allowing gaps to remain explicit in the exported results.
