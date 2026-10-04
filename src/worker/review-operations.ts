@@ -454,7 +454,11 @@ export async function materializeReviewReport(env:Env,id:string):Promise<void> {
  const gaps=rows.some(r=>r.relationship==='unknown'||r.import_status==='draft')||(counters.resources_unavailable??0)>0;
  await env.DB.prepare('UPDATE review_operations SET status=?,updated_at=? WHERE id=?').bind(gaps?'complete_with_gaps':'complete',stamp(),id).run();
 }
-async function requestBody(request:Request):Promise<Row>{if(Number(request.headers.get('content-length')??0)>1000000)throw new Error('Request body exceeds 1 MB.');const text=await request.text();if(new TextEncoder().encode(text).length>1000000)throw new Error('Request body exceeds 1 MB.');return JSON.parse(text);}
+async function requestBody(request:Request):Promise<Row>{if(Number(request.headers.get('content-length')??0)>1000000)throw new Error('Request body exceeds 1 MB.');const encoding=request.headers.get('content-encoding');if(encoding&&encoding!=='gzip')throw new Error('Unsupported content encoding.');
+ const source=encoding==='gzip'?request.body?.pipeThrough(new DecompressionStream('gzip')):request.body;
+ if(!source)throw new Error('Missing request body.');const reader=source.getReader();const chunks:Uint8Array[]=[];let bytes=0;
+ for(;;){const next=await reader.read();if(next.done)break;bytes+=next.value.byteLength;if(bytes>1000000){await reader.cancel();throw new Error('Request body exceeds 1 MB.');}chunks.push(next.value);}
+ const joined=new Uint8Array(bytes);let offset=0;for(const chunk of chunks){joined.set(chunk,offset);offset+=chunk.length;}return JSON.parse(new TextDecoder().decode(joined));}
 export async function handleReviewOperations(request:Request,env:Env,path:string,key:string):Promise<Response> {
  try {
   const suffix=path.slice(namespace.length).replace(/^\//,'');

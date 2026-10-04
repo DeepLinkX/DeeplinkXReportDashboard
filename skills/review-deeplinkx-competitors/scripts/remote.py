@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -40,7 +41,7 @@ def curl_open(req, timeout=60):
             config_path = Path(stream.name)
             os.chmod(config_path, 0o600)
             stream.write('\n'.join(config) + '\n')
-        completed = subprocess.run(['curl', '--config', str(config_path), '--dump-header', '-',
+        completed = subprocess.run(['curl', '--http1.1', '--config', str(config_path), '--dump-header', '-',
             '--write-out', '\n__DEEPLINKX_HTTP_STATUS__:%{http_code}'], input=req.data,
             capture_output=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
@@ -92,7 +93,10 @@ def request(token, suffix='', payload=None, key=None):
     if payload is not None:
         headers['Content-Type'] = 'application/json'
         headers['Idempotency-Key'] = key or uuid.uuid4().hex
-    req = urllib.request.Request(ORIGIN + ROOT + suffix, data=None if payload is None else json.dumps(payload).encode(), headers=headers)
+    body=None if payload is None else json.dumps(payload).encode()
+    if body is not None and len(body)>1024:
+        body=gzip.compress(body,mtime=0);headers['Content-Encoding']='gzip'
+    req = urllib.request.Request(ORIGIN + ROOT + suffix, data=body, headers=headers)
     # Transport is foreground and secrets go through a mode-0600 temporary config.
     # Mutations are retried only with identical idempotency keys.
     for attempt in range(3):

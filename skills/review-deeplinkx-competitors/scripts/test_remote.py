@@ -87,3 +87,24 @@ class StatusTests(unittest.TestCase):
         with patch.object(remote,'token_from',return_value='secret'),patch.object(remote,'request',return_value={'operations':[]}) as call:
             remote.run(args)
             self.assertEqual(len(call.call_args.args),1)
+
+class TransportTests(unittest.TestCase):
+    def test_transport_uses_http1_and_keeps_credentials_out_of_arguments(self):
+        import subprocess
+        import urllib.request
+        response=subprocess.CompletedProcess([],0,stdout=b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}\n__DEEPLINKX_HTTP_STATUS__:200',stderr=b'')
+        with patch.object(remote.subprocess,'run',return_value=response) as call:
+            request=urllib.request.Request(remote.ORIGIN+remote.ROOT,headers={'Authorization':'Bearer hidden'})
+            self.assertEqual(remote.curl_open(request).read(),b'{}')
+            self.assertIn('--http1.1',call.call_args.args[0]);self.assertNotIn('hidden',' '.join(call.call_args.args[0]))
+
+class CompressionTests(unittest.TestCase):
+    def test_large_body_is_compressed_without_changing_idempotency(self):
+        payload={'finding':'evidence '*1000}
+        def send(req,timeout):
+            self.assertEqual(req.get_header('Content-encoding'),'gzip')
+            self.assertEqual(json.loads(remote.gzip.decompress(req.data)),payload)
+            self.assertEqual(req.get_header('Idempotency-key'),'stable')
+            return remote.CurlResponse(b'{"ok":true}',{})
+        with patch.object(remote,'curl_open',side_effect=send):
+            self.assertEqual(remote.request('secret','/op/results',payload,'stable'),{'ok':True})

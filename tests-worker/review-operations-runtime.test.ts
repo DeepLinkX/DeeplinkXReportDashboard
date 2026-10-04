@@ -141,3 +141,13 @@ it('freezes unfinished server candidates while excluding reviewed noise and unch
  const listed=await handleReviewOperations(new Request('https://test/api/v1/admin/competitors/review-operations'),env,'/api/v1/admin/competitors/review-operations','read');
  expect((await listed.json() as any).operations.some((r:any)=>r.id===fresh.id)).toBe(true);
 });
+
+it('accepts compressed JSON with the same import contract and rejects oversized expansion',async()=>{
+ const json=JSON.stringify({package_names:[],scope:'fixture'});
+ const compressed=await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+ const response=await handleReviewOperations(new Request('https://test/api/v1/admin/competitors/review-operations',{method:'POST',headers:{'content-encoding':'gzip'},body:compressed}),env,'/api/v1/admin/competitors/review-operations','compressed-create');
+ expect(response.status).toBe(200);
+ const huge=await new Response(new Blob([' '.repeat(1000001)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+ const rejected=await handleReviewOperations(new Request('https://test/api/v1/admin/competitors/review-operations',{method:'POST',headers:{'content-encoding':'gzip'},body:huge}),env,'/api/v1/admin/competitors/review-operations','compressed-huge');
+ expect(rejected.status).toBe(400);expect(await rejected.text()).toContain('1 MB');
+});

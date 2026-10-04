@@ -447,3 +447,7 @@ missing reviewer/time/origin sidecars; it does not collect package details.
 Review policies retain the version supported by the reviewed documentation as their
 baseline, separately from a newer observed publication. Finalization reopens only
 answers whose supporting evidence changed; metrics alone do not reopen them.
+
+Protected review-operation JSON accepts gzip with the same 1 MB decompressed limit.
+The helper compresses larger requests to reduce upload traffic and uses HTTP/1.1
+for the maintainer connection; TLS verification and authorization remain required.
