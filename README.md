@@ -458,3 +458,7 @@ invocation. This is separate from the daily row quota and preserves resource reu
 Operation status exposes up to five current resource blockers. Completed review
 reports include per-resource unavailable reasons and missing fields without raw
 response bodies, allowing gaps to remain explicit in the exported results.
+
+Report notes can be saved incrementally using protected finalization with
+`notes_only: true`. This does not dispatch work or bypass completion gates, and
+completed artifacts remain immutable.

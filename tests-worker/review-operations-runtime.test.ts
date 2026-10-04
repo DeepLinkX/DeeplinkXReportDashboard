@@ -171,3 +171,12 @@ it('exports every resource across prefix-sensitive cursor pages',async()=>{
  const response=await handleReviewOperations(new Request(`https://test/api/v1/admin/competitors/review-operations/${o.id}/report?format=json`),env,`/api/v1/admin/competitors/review-operations/${o.id}/report`,'read');
  const report=await response.json() as any;expect(report.resource_outcomes).toHaveLength(101);expect(new Set(report.resource_outcomes.map((r:any)=>r.package_name)).size).toBe(101);
 });
+
+it('saves incremental report notes without dispatching or bypassing completion gates',async()=>{
+ const o=await op('notes-only');await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_notes_pending',question:'An unanswered action question'}]});
+ const send=vi.spyOn(env.SCAN_QUEUE,'send');
+ await finalizeReviewOperation(env,o.id,{notes_only:true,notes:{summary:'Draft examined findings'}});
+ expect(send).not.toHaveBeenCalled();expect((await reviewOperationStatus(env,o.id) as any).status).toBe('running');
+ await expect(finalizeReviewOperation(env,o.id,{})).rejects.toThrow('Unfinished work');
+ expect(JSON.parse((await env.DB.prepare('SELECT notes_json FROM review_operations WHERE id=?').bind(o.id).first<any>())!.notes_json).summary).toBe('Draft examined findings');
+});

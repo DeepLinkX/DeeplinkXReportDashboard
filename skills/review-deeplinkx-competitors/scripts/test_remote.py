@@ -120,3 +120,15 @@ class BinaryTransportTests(unittest.TestCase):
             return subprocess.CompletedProcess([],0,stdout=b'HTTP/1.1 200 OK\r\n\r\n{}\n__DEEPLINKX_HTTP_STATUS__:200',stderr=b'')
         with patch.object(remote.subprocess,'run',side_effect=send):
             self.assertEqual(remote.curl_open(urllib.request.Request(remote.ORIGIN+remote.ROOT,data=b'\x00\r\n')).read(),b'{}')
+
+class RateTests(unittest.TestCase):
+    def test_optional_upload_rate_does_not_throttle_reads(self):
+        import subprocess,urllib.request
+        configs=[]
+        def send(command,**kwargs):
+            configs.append(Path(command[command.index('--config')+1]).read_text())
+            return subprocess.CompletedProcess([],0,stdout=b'HTTP/1.1 200 OK\r\n\r\n{}\n__DEEPLINKX_HTTP_STATUS__:200',stderr=b'')
+        with patch.dict(remote.os.environ,{'DEEPLINKX_UPLOAD_RATE':'1024'}),patch.object(remote.subprocess,'run',side_effect=send):
+            remote.curl_open(urllib.request.Request(remote.ORIGIN+remote.ROOT,data=b'a'*2000))
+            remote.curl_open(urllib.request.Request(remote.ORIGIN+remote.ROOT))
+        self.assertIn('limit-rate = 1024',configs[0]);self.assertNotIn('limit-rate',configs[1])

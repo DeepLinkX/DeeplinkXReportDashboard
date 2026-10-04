@@ -35,6 +35,8 @@ def curl_open(req, timeout=60):
         config.append(f'header = {json.dumps(name + ": " + value)}')
     if req.data is not None:
         config.append('data-binary = "@-"')
+        rate=os.environ.get('DEEPLINKX_UPLOAD_RATE','')
+        if len(req.data)>1024 and rate.isdigit() and int(rate)>0:config.append(f'limit-rate = {int(rate)}')
     config_path = None
     try:
         with tempfile.NamedTemporaryFile('w', encoding='utf-8', prefix='deeplinkx-curl-', suffix='.conf', delete=False) as stream:

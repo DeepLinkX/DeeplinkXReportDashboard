@@ -408,7 +408,9 @@ export async function submitReviewResults(env:Env,id:string,body:Row):Promise<un
 }
 export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promise<unknown> {
  const op=await operation(env,id);if(finalStates.includes(op.status))return reviewOperationStatus(env,id);
+ if(body.notes_only){await mutable(env,id);if(!body.notes)throw new Error('Notes-only requests require report notes.');}
  if(body.notes){if(JSON.stringify(body.notes).length>100000)throw new Error('Report notes exceed bounded size.');await env.DB.prepare('UPDATE review_operations SET notes_json=json_patch(notes_json,?) WHERE id=?').bind(JSON.stringify(body.notes),id).run();}
+ if(body.notes_only)return reviewOperationStatus(env,id);
  if(body.collect_metrics) {
   const rows=await env.DB.prepare("SELECT package_name FROM review_operation_packages WHERE operation_id=? AND relationship IN ('direct','adjacent') AND package_name>? ORDER BY package_name LIMIT 20").bind(id,body.cursor??'').all<Row>();
   for(const r of rows.results)await scheduleReviewResource(env,id,r.package_name,'metrics');
