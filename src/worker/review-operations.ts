@@ -409,9 +409,9 @@ export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promis
  const op=await operation(env,id);if(finalStates.includes(op.status))return reviewOperationStatus(env,id);
  if(body.notes){if(JSON.stringify(body.notes).length>100000)throw new Error('Report notes exceed bounded size.');await env.DB.prepare('UPDATE review_operations SET notes_json=json_patch(notes_json,?) WHERE id=?').bind(JSON.stringify(body.notes),id).run();}
  if(body.collect_metrics) {
-  const rows=await env.DB.prepare("SELECT package_name FROM review_operation_packages WHERE operation_id=? AND relationship IN ('direct','adjacent') AND package_name>? ORDER BY package_name LIMIT 100").bind(id,body.cursor??'').all<Row>();
+  const rows=await env.DB.prepare("SELECT package_name FROM review_operation_packages WHERE operation_id=? AND relationship IN ('direct','adjacent') AND package_name>? ORDER BY package_name LIMIT 20").bind(id,body.cursor??'').all<Row>();
   for(const r of rows.results)await scheduleReviewResource(env,id,r.package_name,'metrics');
-  return {scheduled:rows.results.length,cursor:rows.results.at(-1)?.package_name??null,done:rows.results.length<100};
+  return {scheduled:rows.results.length,cursor:rows.results.at(-1)?.package_name??null,done:rows.results.length<20};
  }
  if(body.resume){await kickReviewResources(env,id,true);return reviewOperationStatus(env,id);}
  const changed=await env.DB.prepare('SELECT p.package_name,cr.evidence_hash FROM review_operation_packages p JOIN competitor_registry cr ON cr.package_name=p.package_name WHERE p.operation_id=? AND p.result_json IS NOT NULL AND p.evidence_hash IS NOT cr.evidence_hash ORDER BY p.package_name LIMIT 10').bind(id).all<Row>();

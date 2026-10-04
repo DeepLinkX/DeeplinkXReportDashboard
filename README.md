@@ -451,3 +451,6 @@ answers whose supporting evidence changed; metrics alone do not reopen them.
 Protected review-operation JSON accepts gzip with the same 1 MB decompressed limit.
 The helper compresses larger requests to reduce upload traffic and uses HTTP/1.1
 for the maintainer connection; TLS verification and authorization remain required.
+
+Review metric admission uses twenty-package cursor pages to bound queries per Worker
+invocation. This is separate from the daily row quota and preserves resource reuse.

@@ -151,3 +151,11 @@ it('accepts compressed JSON with the same import contract and rejects oversized 
  const rejected=await handleReviewOperations(new Request('https://test/api/v1/admin/competitors/review-operations',{method:'POST',headers:{'content-encoding':'gzip'},body:huge}),env,'/api/v1/admin/competitors/review-operations','compressed-huge');
  expect(rejected.status).toBe(400);expect(await rejected.text()).toContain('1 MB');
 });
+
+it('bounds metric admission to twenty packages and returns the remaining cursor',async()=>{
+ const names=Array.from({length:21},(_,i)=>`op_metrics_page_${String(i).padStart(2,'0')}`);
+ for(const name of names){await seed(name);await env.DB.prepare("UPDATE competitor_registry SET metrics_captured_at='2026-09-22' WHERE package_name=?").bind(name).run();}
+ const o=await op('metric-pages',{package_names:names,expected_packages:21});
+ const first=await finalizeReviewOperation(env,o.id,{collect_metrics:true}) as any;expect(first.scheduled).toBe(20);expect(first.done).toBe(false);
+ const last=await finalizeReviewOperation(env,o.id,{collect_metrics:true,cursor:first.cursor}) as any;expect(last.scheduled).toBe(1);expect(last.done).toBe(true);
+});

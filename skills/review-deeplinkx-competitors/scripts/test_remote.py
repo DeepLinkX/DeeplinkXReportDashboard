@@ -108,3 +108,15 @@ class CompressionTests(unittest.TestCase):
             return remote.CurlResponse(b'{"ok":true}',{})
         with patch.object(remote,'curl_open',side_effect=send):
             self.assertEqual(remote.request('secret','/op/results',payload,'stable'),{'ok':True})
+
+class BinaryTransportTests(unittest.TestCase):
+    def test_curl_body_is_binary_safe(self):
+        import subprocess
+        import urllib.request
+        def send(command,**kwargs):
+            config=Path(command[command.index('--config')+1]).read_text()
+            self.assertIn('data-binary = "@-"',config)
+            self.assertEqual(kwargs['input'],b'\x00\r\n')
+            return subprocess.CompletedProcess([],0,stdout=b'HTTP/1.1 200 OK\r\n\r\n{}\n__DEEPLINKX_HTTP_STATUS__:200',stderr=b'')
+        with patch.object(remote.subprocess,'run',side_effect=send):
+            self.assertEqual(remote.curl_open(urllib.request.Request(remote.ORIGIN+remote.ROOT,data=b'\x00\r\n')).read(),b'{}')

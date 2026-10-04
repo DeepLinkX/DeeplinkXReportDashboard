@@ -34,7 +34,7 @@ def curl_open(req, timeout=60):
     for name, value in req.header_items():
         config.append(f'header = {json.dumps(name + ": " + value)}')
     if req.data is not None:
-        config.append('data = "@-"')
+        config.append('data-binary = "@-"')
     config_path = None
     try:
         with tempfile.NamedTemporaryFile('w', encoding='utf-8', prefix='deeplinkx-curl-', suffix='.conf', delete=False) as stream:
@@ -204,7 +204,7 @@ def run(args):
                 review=json.loads(Path(member['review_path']).read_text());details=review.get('review',{})
                 provenance={'origin':details.get('decision_origin','previous_review'),'reviewed_at':details.get('reviewed_at'),'reviewed_by':review.get('reviewed_by'),'source_review_sha256':member.get('review_sha256'),'source_evidence_sha256':member.get('evidence_sha256'),'original_relationship':review['decision']['relationship']}
                 batch.append({'package_name':member['package_name'],'provenance':provenance})
-                if len(batch)==10:
+                if len(batch)==getattr(args,'batch_size',10):
                     body={'packages':batch,'provenance_only':True}
                     request(token,suffix+'/bootstrap',body,key='provenance-'+hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest())
                     restored+=len(batch);batch=[]
@@ -268,6 +268,7 @@ def main(argv=None):
     parser.add_argument('--manifest')
     parser.add_argument('--inventory')
     parser.add_argument('--metrics-report')
+    parser.add_argument('--batch-size',type=int,choices=range(1,11),default=10,help='Bounded provenance upload size; reduce on constrained connections')
     parser.add_argument('--provenance-only',action='store_true',help='One-time restoration of missing original reviewer/date/origin; no evidence bodies')
     parser.add_argument('--format', choices=['markdown','json','csv'], default='markdown')
     parser.add_argument('--output')
