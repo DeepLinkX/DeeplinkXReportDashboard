@@ -466,3 +466,9 @@ completed artifacts remain immutable.
 Packet claiming rechecks reviewed noise policies. A candidate excluded after
 admission is materialized as a reused exclusion without an agent packet or any
 package-specific upstream request.
+
+Finalization repairs legacy membership bindings only when an already-saved
+answer or answered question proves the current evidence hash. A bounded
+`reconciling` response means repeat finalization with a new idempotency key;
+genuinely changed supporting evidence still opens a targeted question. Reuse
+repairs are counted separately and do not count as new semantic reviews.

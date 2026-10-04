@@ -188,3 +188,14 @@ it('reuses a noise decision confirmed after admission without issuing a review p
  expect(packet.packets).toHaveLength(0);expect(fetcher).not.toHaveBeenCalled();
  const status=await reviewOperationStatus(env,o.id) as any;expect(status.counters.pending_questions).toBe(0);expect(status.counters.reused_decisions).toBe(1);expect(status.counters.newly_reviewed??0).toBe(0);
 });
+it('repairs a stale membership hash only when the saved answer is already bound to current evidence',async()=>{
+ await seed('op_binding_reuse',adjacent,false);const o=await op('binding-reuse');await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_binding_reuse'}]});
+ const packet=await claimReviewPacket(env,o.id,'claim',{reviewer:'A'}) as any;
+ await submitReviewResults(env,o.id,{lease_key:packet.lease_key,results:[{package_name:'op_binding_reuse',finding:'Receives inbound links; no outbound action.',sources:[{url:'https://pub.dev/packages/op_binding_reuse'}],envelope:{package_name:'op_binding_reuse',evidence_hash:'a'.repeat(64),product_commit:catalog.source_commit,reviewed_by:'A',decision:adjacent}}]});
+ await env.DB.prepare("UPDATE review_operation_packages SET evidence_hash=? WHERE operation_id=?").bind('b'.repeat(64),o.id).run();
+ await env.DB.prepare("INSERT INTO review_operation_questions(operation_id,package_name,question_key,lane,question,status,frozen_hash) VALUES(?,'op_binding_reuse',?,'evidence_conflict','Legacy binding check','pending',?)").bind(o.id,'evidence-change:'+'a'.repeat(64),'a'.repeat(64)).run();
+ await env.DB.prepare("UPDATE review_operations SET counters_json=json_set(counters_json,'$.pending_questions',1) WHERE id=?").bind(o.id).run();
+ expect(await finalizeReviewOperation(env,o.id,{})).toMatchObject({status:'reconciling',reused_answer_bindings:1});
+ const status=await reviewOperationStatus(env,o.id) as any;expect(status.counters.pending_questions).toBe(0);expect(status.counters.newly_reviewed).toBe(1);expect(status.counters.reused_answer_bindings).toBe(1);
+ const member=await env.DB.prepare('SELECT evidence_hash FROM review_operation_packages WHERE operation_id=?').bind(o.id).first<any>();expect(member.evidence_hash).toBe('a'.repeat(64));
+});

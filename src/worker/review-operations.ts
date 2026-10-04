@@ -206,9 +206,14 @@ export async function claimReviewPacket(env:Env,id:string,key:string,body:Row):P
   const qs=await env.DB.prepare("SELECT question_key,lane,question,frozen_hash FROM review_operation_questions WHERE operation_id=? AND package_name=? AND lease_key=? AND status='claimed'").bind(id,name,lease).all<Row>();
   if(!qs.results.length) continue;
   const p=await env.DB.prepare('SELECT * FROM review_operation_packages WHERE operation_id=? AND package_name=?').bind(id,name).first<Row>();
+  const policy=await policyFor(env,name);
+  if(policy?.state==='confirmed_noise'&&policy.scope===REVIEW_SCOPE) {
+   for(const q of qs.results)await event(env,id,`answer:${name}:${q.question_key}`,{pending_questions:-1,answered_questions:1},[env.DB.prepare("UPDATE review_operation_questions SET status='answered',answer_json=? WHERE operation_id=? AND package_name=? AND question_key=?").bind(JSON.stringify({finding:'Reused confirmed unrelated-functionality exclusion; no semantic review.',origin:'policy_reuse'}),id,name,q.question_key)]);
+   await env.DB.prepare("UPDATE review_operation_packages SET disposition='excluded_noise',relationship='noise',lease_key=NULL,lease_until=NULL WHERE operation_id=? AND package_name=?").bind(id,name).run();
+   await event(env,id,`late-noise:${name}`,{reused_decisions:1});continue;
+  }
   if(p?.disposition==='excluded_noise') continue;
   const row=await env.DB.prepare('SELECT metadata_json,documentation_text,documentation_version,evidence_hash,evidence_sources_json FROM competitor_registry WHERE package_name=?').bind(name).first<Row>();
-  const policy=await policyFor(env,name);
   await env.DB.prepare("UPDATE review_operation_questions SET frozen_hash=? WHERE operation_id=? AND package_name=? AND lease_key=? AND status='claimed'").bind(row?.evidence_hash??null,id,name,lease).run();
   const legacy=await env.DB.prepare("SELECT body,version FROM review_operation_resources WHERE operation_id=? AND package_name=? AND kind='legacy_documentation' LIMIT 1").bind(id,name).first<Row>();
   const delta=await env.DB.prepare("SELECT body,version FROM review_operation_resources WHERE operation_id=? AND package_name=? AND kind='changelog' AND status='complete' ORDER BY observed_at DESC LIMIT 1").bind(id,name).first<Row>();
@@ -417,6 +422,21 @@ export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promis
   return {scheduled:rows.results.length,cursor:rows.results.at(-1)?.package_name??null,done:rows.results.length<20};
  }
  if(body.resume){await kickReviewResources(env,id,true);return reviewOperationStatus(env,id);}
+ // Earlier submitters saved the answer binding but not the membership binding.
+ // Repair only a proven current binding; never attach a new hash to old evidence.
+ const bindings=await env.DB.prepare(`SELECT p.package_name,cr.evidence_hash FROM review_operation_packages p JOIN competitor_registry cr ON cr.package_name=p.package_name
+ WHERE p.operation_id=? AND p.result_json IS NOT NULL AND p.evidence_hash IS NOT cr.evidence_hash AND
+ (json_extract(p.result_json,'$.envelope.evidence_hash')=cr.evidence_hash OR
+ (json_extract(p.result_json,'$.envelope') IS NULL AND EXISTS(SELECT 1 FROM review_operation_questions q WHERE q.operation_id=p.operation_id AND q.package_name=p.package_name AND q.status='answered' AND q.frozen_hash=cr.evidence_hash))) ORDER BY p.package_name LIMIT 5`).bind(id).all<Row>();
+ if(bindings.results.length){
+  for(const row of bindings.results){
+   await env.DB.prepare('UPDATE review_operation_packages SET evidence_hash=? WHERE operation_id=? AND package_name=?').bind(row.evidence_hash,id,row.package_name).run();
+   const qs=await env.DB.prepare("SELECT question_key FROM review_operation_questions WHERE operation_id=? AND package_name=? AND question_key=? AND status IN ('pending','claimed')").bind(id,row.package_name,`evidence-change:${row.evidence_hash}`).all<Row>();
+   for(const q of qs.results)await event(env,id,`answer:${row.package_name}:${q.question_key}`,{pending_questions:-1,answered_questions:1},[env.DB.prepare("UPDATE review_operation_questions SET status='answered',answer_json=? WHERE operation_id=? AND package_name=? AND question_key=?").bind(JSON.stringify({finding:'Saved answer already binds to current evidence; membership bookkeeping reconciled without another review.',origin:'binding_reuse'}),id,row.package_name,q.question_key)]);
+   await event(env,id,`binding-reuse:${row.package_name}:${row.evidence_hash}`,{reused_answer_bindings:1});
+  }
+  return {id,status:'reconciling',reused_answer_bindings:bindings.results.length};
+ }
  const changed=await env.DB.prepare('SELECT p.package_name,cr.evidence_hash FROM review_operation_packages p JOIN competitor_registry cr ON cr.package_name=p.package_name WHERE p.operation_id=? AND p.result_json IS NOT NULL AND p.evidence_hash IS NOT cr.evidence_hash ORDER BY p.package_name LIMIT 10').bind(id).all<Row>();
  if(changed.results.length){for(const row of changed.results)await question(env,id,row.package_name,`evidence-change:${row.evidence_hash}`,'evidence_conflict','Supporting evidence changed after the answer. Examine only the changed claim.',row.evidence_hash);throw new Error(`Evidence changed for ${changed.results.length} answered packages; targeted questions reopened.`);}
  const counters=parse(op.counters_json);

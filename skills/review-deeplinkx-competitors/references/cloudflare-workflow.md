@@ -64,6 +64,8 @@ For this operation, existing metric observations are reused regardless of age. R
 
 Reports include every frozen identity, minimal noise accounting, relevant metrics/dates, corrected findings, original/reused/manual origins, missing evidence, and server-generated tables. Ranking with missing downloads is only a ranking among observed values.
 
+Finalization can return `reconciling` while bounded legacy membership records are repaired using already-saved answers bound to the current hash. Repeat finalization with a new key until it reaches the normal gates. These repairs reuse answers; genuinely changed evidence still opens a named question. Do not attach a current hash to different evidence or repeat semantic review for a proven bookkeeping mismatch.
+
 ## Explicit offline recovery
 
 Only when requested, existing `collect/select/prepare/reuse/validate/ledger/render` commands may read an existing frozen SQLite snapshot and write exports outside repositories. No fresh full D1 export or re-import is implied. Local evidence must retain its original snapshot/version and is reconciled before any production import. Offline results are not automatically current Cloudflare decisions. No mandatory noise controls or forty-package cap apply to a requested full review.
