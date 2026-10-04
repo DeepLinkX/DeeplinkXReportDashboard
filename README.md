@@ -462,3 +462,7 @@ response bodies, allowing gaps to remain explicit in the exported results.
 Report notes can be saved incrementally using protected finalization with
 `notes_only: true`. This does not dispatch work or bypass completion gates, and
 completed artifacts remain immutable.
+
+Packet claiming rechecks reviewed noise policies. A candidate excluded after
+admission is materialized as a reused exclusion without an agent packet or any
+package-specific upstream request.

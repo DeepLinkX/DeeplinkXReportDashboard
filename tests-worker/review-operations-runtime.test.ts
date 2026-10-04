@@ -180,3 +180,11 @@ it('saves incremental report notes without dispatching or bypassing completion g
  await expect(finalizeReviewOperation(env,o.id,{})).rejects.toThrow('Unfinished work');
  expect(JSON.parse((await env.DB.prepare('SELECT notes_json FROM review_operations WHERE id=?').bind(o.id).first<any>())!.notes_json).summary).toBe('Draft examined findings');
 });
+
+it('reuses a noise decision confirmed after admission without issuing a review packet',async()=>{
+ await seed('op_late_noise',noise,false);const o=await op('late-noise');await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_late_noise'}]});
+ await importReview(env,{package_name:'op_late_noise',evidence_hash:'a'.repeat(64),product_commit:catalog.source_commit,reviewed_by:'maintainer',decision:noise});
+ const fetcher=vi.spyOn(globalThis,'fetch');const packet=await claimReviewPacket(env,o.id,'claim',{reviewer:'A'}) as any;
+ expect(packet.packets).toHaveLength(0);expect(fetcher).not.toHaveBeenCalled();
+ const status=await reviewOperationStatus(env,o.id) as any;expect(status.counters.pending_questions).toBe(0);expect(status.counters.reused_decisions).toBe(1);expect(status.counters.newly_reviewed??0).toBe(0);
+});
