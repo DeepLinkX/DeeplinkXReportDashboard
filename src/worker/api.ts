@@ -597,7 +597,7 @@ export async function handleUncachedApi(
     }
     return errorResponse(404, "API endpoint not found.");
   } catch (error) {
-    if (isD1DailyQuotaError(error)) return quotaUnavailable();
+    if (isD1DailyQuotaError(error)) return path.startsWith("/api/v1/admin/competitors/review-operations") ? json({error:"Cloudflare D1 daily quota reached. Review progress is preserved; stop and await explicit user resumption."},{status:503,headers:{"cache-control":"no-store"}}) : quotaUnavailable();
     if (error instanceof StartupQueueUnavailable) return json({error:error.message},{status:503,headers:{"cache-control":"no-store","retry-after":"60"}});
     if (error instanceof PermanentCompetitorError) {
       return errorResponse(error.code.endsWith("idempotency-conflict") ? 409 : 400, error.message);

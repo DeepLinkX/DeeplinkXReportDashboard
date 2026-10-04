@@ -16,7 +16,7 @@ async function seed(name:string,decision=adjacent,confirmed=true){
  if(confirmed)await importReview(env,{package_name:name,evidence_hash:hash,product_commit:catalog.source_commit,reviewed_by:'fixture reviewer',decision});
  return hash;
 }
-async function op(key:string,body={}){return await createReviewOperation(env,key,{evidence_mode:'cloudflare_first',...body}) as any;}
+async function op(key:string,body={}){return await createReviewOperation(env,key,{evidence_mode:'cloudflare_first',package_names:[],...body}) as any;}
 it('reuses reviewed noise and blocks resources including stale jobs without deleting old metrics',async()=>{
  await seed('op_noise',noise);await env.DB.prepare("UPDATE competitor_registry SET downloads_30d=500,metrics_captured_at='2020' WHERE package_name='op_noise'").run();
  const o=await op('noise');await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_noise'}]});
@@ -103,4 +103,41 @@ it('preserves older score fields when a new valid response omits them',async()=>
  vi.spyOn(globalThis,'fetch').mockResolvedValue(Response.json({likeCount:2,grantedPoints:100}));await processReviewResource(env,o.id,'op_missing_field','metrics','');
  expect((await env.DB.prepare("SELECT downloads_30d FROM competitor_registry WHERE package_name='op_missing_field'").first<any>())?.downloads_30d).toBe(100);
  expect((await env.DB.prepare('SELECT missing_json FROM review_operation_resources WHERE operation_id=?').bind(o.id).first<any>())?.missing_json).toContain('downloads_30d');
+});
+it('reopens only an answered package whose supporting evidence changed before finalization',async()=>{
+ await seed('op_changed_after_answer',adjacent,false);const o=await op('changed-after-answer');await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_changed_after_answer'}]});
+ const packet=await claimReviewPacket(env,o.id,'claim',{reviewer:'A'}) as any;
+ await submitReviewResults(env,o.id,{lease_key:packet.lease_key,results:[{package_name:'op_changed_after_answer',finding:'The retained excerpt leaves the platform unestablished.',sources:[{url:'https://pub.dev/packages/op_changed_after_answer'}],unresolved_reason:'Platform evidence missing.'}]});
+ await env.DB.prepare("UPDATE competitor_registry SET evidence_hash=? WHERE package_name='op_changed_after_answer'").bind('b'.repeat(64)).run();
+ await expect(finalizeReviewOperation(env,o.id,{})).rejects.toThrow('Evidence changed');
+ expect((await reviewOperationStatus(env,o.id) as any).counters.pending_questions).toBe(1);
+ const reopened=await claimReviewPacket(env,o.id,'claim2',{reviewer:'A'}) as any;expect(reopened.packets[0].questions[0].frozen_hash).toBe('b'.repeat(64));
+});
+it('restores original provenance for excluded noise without resources or reviews',async()=>{
+ await seed('op_provenance_noise',noise);const o=await op('provenance-noise',{package_names:['op_provenance_noise'],expected_packages:1});
+ const provenance={origin:'manual_llm_review',reviewed_by:'original reviewer',reviewed_at:'2026-09-20T00:00:00Z',source_review_sha256:'a'.repeat(64)};
+ const fetcher=vi.spyOn(globalThis,'fetch');
+ await bootstrapReviewOperation(env,o.id,{provenance_only:true,packages:[{package_name:'op_provenance_noise',provenance}]});
+ const saved=await env.DB.prepare('SELECT provenance_json FROM review_operation_packages WHERE operation_id=?').bind(o.id).first<any>();
+ expect(JSON.parse(saved.provenance_json).reviewed_at).toBe(provenance.reviewed_at);
+ expect((await claimReviewPacket(env,o.id,'claim',{reviewer:'A'}) as any).packets).toHaveLength(0);expect(fetcher).not.toHaveBeenCalled();
+});
+it('preserves the documented version as baseline when observed publication is newer',async()=>{
+ await seed('op_baseline',adjacent,false);await env.DB.prepare("UPDATE competitor_registry SET metadata_json=json_set(metadata_json,'$.version','2.0.0') WHERE package_name='op_baseline'").run();
+ await importReview(env,{package_name:'op_baseline',evidence_hash:'a'.repeat(64),product_commit:catalog.source_commit,reviewed_by:'baseline reviewer',decision:adjacent});
+ const row=await env.DB.prepare("SELECT metadata_json,documentation_text FROM competitor_review_policies WHERE package_name='op_baseline'").first<any>();
+ expect(JSON.parse(row.metadata_json).version).toBe('1.0.0');expect(JSON.parse(row.metadata_json).observed_version).toBe('2.0.0');expect(row.documentation_text).toBe('Documented package behavior');
+});
+
+it('freezes unfinished server candidates while excluding reviewed noise and unchanged examined gaps',async()=>{
+ await seed('op_auto_candidate',adjacent,false);await seed('op_auto_noise',noise);
+ await seed('op_auto_gap',adjacent,false);const previous=await op('auto-previous',{package_names:['op_auto_gap'],expected_packages:1});
+ await env.DB.prepare("INSERT INTO review_operation_packages(operation_id,package_name,disposition,relationship,evidence_hash,updated_at) VALUES(?,'op_auto_gap','wait_for_evidence','unknown',?,'2026')").bind(previous.id,'a'.repeat(64)).run();
+ await env.DB.prepare("UPDATE review_operations SET status='complete_with_gaps',updated_at='9999' WHERE id=?").bind(previous.id).run();
+ const fresh=await createReviewOperation(env,'auto-fresh',{evidence_mode:'cloudflare_only'}) as any;
+ const names=(await env.DB.prepare('SELECT package_name FROM review_operation_packages WHERE operation_id=?').bind(fresh.id).all<any>()).results.map(r=>r.package_name);
+ expect(names).toContain('op_auto_candidate');expect(names).not.toContain('op_auto_noise');expect(names).not.toContain('op_auto_gap');
+ expect(fresh.counters.pending_questions).toBe(names.length);
+ const listed=await handleReviewOperations(new Request('https://test/api/v1/admin/competitors/review-operations'),env,'/api/v1/admin/competitors/review-operations','read');
+ expect((await listed.json() as any).operations.some((r:any)=>r.id===fresh.id)).toBe(true);
 });

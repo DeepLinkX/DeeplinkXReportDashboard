@@ -7,14 +7,14 @@ All normal commands call `/api/v1/admin/competitors/review-operations`. The Work
 
 Use `DEEPLINKX_ADMIN_TOKEN` or `--secrets-file <dashboard>/.dev.vars`. Never paste a credential into chat, a command argument, or a review answer. The client refuses unrelated destinations/redirects. Supply a stable `--key` for start; read the returned operation ID. Subsequent writes get a fresh key per invocation, retained across transport retries. Explicit `--key` can replay the same write safely.
 
-Read status when a decision is needed, not repeatedly while a resource is waiting. This task remains the same task during interruptions. A quota error stops the agent; follow the user's resume preference. New human review operations default to manual quota-stop. Explicit `finalize` with `{"resume":true}` redispatches the persisted resource phase when resumption is authorized.
+`remote status` without an operation lists twenty existing operations; use returned IDs to resume. A normal `start` without a legacy manifest freezes unfinished Cloudflare candidates, excluding confirmed noise and unchanged examined gaps. Internal metrics/update operations remain separate. Read status when a decision is needed, not repeatedly while a resource is waiting. This task remains the same task during interruptions. A quota error stops the agent; follow the user's resume preference. New human review operations default to manual quota-stop. Explicit `finalize` with `{"resume":true}` redispatches the persisted resource phase when resumption is authorized.
 
 ## Commands (replace the sample identifiers)
 
 Set `helper` to the installed `scripts/review.py`; set `dashboard_repo` to the existing dashboard checkout. These variables are paths, never tokens.
 
 ```bash
-python3 "$helper" remote start --key review-frozen-inventory-v1 --expected-packages 6201 --secrets-file "$dashboard_repo/.dev.vars"
+python3 "$helper" remote start --key review-unfinished-v1 --secrets-file "$dashboard_repo/.dev.vars"
 python3 "$helper" remote status --operation review-RETURNED-ID --secrets-file "$dashboard_repo/.dev.vars"
 python3 "$helper" remote bootstrap --operation review-RETURNED-ID --manifest /path/to/unified-manifest.json --inventory /path/to/product-catalog.json --metrics-report /path/to/metrics-and-drafts.md --secrets-file "$dashboard_repo/.dev.vars"
 python3 "$helper" remote claim --operation review-RETURNED-ID --reviewer reviewer-a --include-inventory --secrets-file "$dashboard_repo/.dev.vars"
@@ -24,7 +24,7 @@ python3 "$helper" remote finalize --operation review-RETURNED-ID --body /path/to
 python3 "$helper" remote report --operation review-RETURNED-ID --format markdown --output /optional/export/report.md --secrets-file "$dashboard_repo/.dev.vars"
 ```
 
-Files are optional input/output conveniences; `--body -` reads JSON from stdin. Without `--output`, report content streams to stdout. Bootstrap is a one-time legacy bridge; it is not required for ordinary later reviews. `--apply-reviews` on start is only for authorized classification imports. `--cloudflare-only` leaves explicit gaps rather than fetching upstream evidence.
+Files are optional input/output conveniences; `--body -` reads JSON from stdin. Without `--output`, report content streams to stdout. Other commands also accept `--output` to save a compact packet or response explicitly; this is optional, not a recovery ledger. Use `remote bootstrap --provenance-only --manifest /path/to/unified-manifest.json` with the same operation/secret arguments once if original reviewer/time/origin is missing; it sends only small provenance records and reuses existing ones. For a legacy frozen closeout, start with `--manifest /path/to/unified-manifest.json --expected-packages 6201` instead of the normal unfinished default. Bootstrap is a one-time legacy bridge; it is not required for ordinary later reviews. `--apply-reviews` on start is only for authorized classification imports. `--cloudflare-only` leaves explicit gaps rather than fetching upstream evidence.
 
 ## Packet and answer
 

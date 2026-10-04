@@ -179,6 +179,7 @@ def run(args):
             body['expected_packages'] = args.expected_packages
         return request(token, payload=body, key=args.key)
     if not args.operation:
+        if args.command=='status':return request(token)
         raise ValueError('--operation is required')
     suffix = '/' + args.operation
     if args.command == 'status':
@@ -191,6 +192,23 @@ def run(args):
         sys.stdout.write(content.decode())
         return None
     if args.command == 'bootstrap' and args.manifest:
+        if getattr(args,'provenance_only',False):
+            missing=set(request(token,suffix+'?provenance_missing=1')['package_names'])
+            manifest=json.loads(Path(args.manifest).read_text());batch=[];restored=0
+            for member in manifest['packages']:
+                if member['package_name'] not in missing:continue
+                review=json.loads(Path(member['review_path']).read_text());details=review.get('review',{})
+                provenance={'origin':details.get('decision_origin','previous_review'),'reviewed_at':details.get('reviewed_at'),'reviewed_by':review.get('reviewed_by'),'source_review_sha256':member.get('review_sha256'),'source_evidence_sha256':member.get('evidence_sha256'),'original_relationship':review['decision']['relationship']}
+                batch.append({'package_name':member['package_name'],'provenance':provenance})
+                if len(batch)==10:
+                    body={'packages':batch,'provenance_only':True}
+                    request(token,suffix+'/bootstrap',body,key='provenance-'+hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest())
+                    restored+=len(batch);batch=[]
+                    if restored%100==0:print(json.dumps({'provenance_restored':restored,'missing_at_start':len(missing)}),file=sys.stderr)
+            if batch:
+                body={'packages':batch,'provenance_only':True}
+                request(token,suffix+'/bootstrap',body,key='provenance-'+hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest());restored+=len(batch)
+            return {'original_provenance_records':restored}
         batch = []
         transferred = 0
         product = json.loads(Path(args.inventory).read_text()) if args.inventory else None
@@ -246,12 +264,16 @@ def main(argv=None):
     parser.add_argument('--manifest')
     parser.add_argument('--inventory')
     parser.add_argument('--metrics-report')
+    parser.add_argument('--provenance-only',action='store_true',help='One-time restoration of missing original reviewer/date/origin; no evidence bodies')
     parser.add_argument('--format', choices=['markdown','json','csv'], default='markdown')
     parser.add_argument('--output')
     args = parser.parse_args(argv)
     try:
         result = run(args)
         if result is not None:
+            if args.output and args.command != 'report':
+                Path(args.output).write_text(json.dumps(result,ensure_ascii=False),encoding='utf-8')
+                result={'saved':str(Path(args.output).resolve()),'packages':len(result.get('packets',[]))}
             print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
     except (ValueError, RuntimeError, OSError) as error:
         parser.exit(1, str(error) + '\n')

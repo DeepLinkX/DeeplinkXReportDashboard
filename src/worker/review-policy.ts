@@ -76,6 +76,11 @@ export function evidenceSnapshot(row: EvidenceRow): { sql: string; values: Array
 export async function reviewPolicyStatement(env: Env, row: EvidenceRow, decision: PackageAnalysis, reviewedBy: string, productCommit: string): Promise<D1PreparedStatement> {
   const stamp = new Date().toISOString();
   const snapshot = evidenceSnapshot(row);
+  const metadata=JSON.parse(String(row.metadata_json||'{}'));
+  // A newer publication does not silently advance the substantively reviewed API baseline.
+  const baselineVersion=row.documentation_text && row.documentation_version ? String(row.documentation_version) : metadata.version;
+  const baselineMetadata={...metadata,version:baselineVersion,observed_version:metadata.version};
+  const baselineRow={...row,metadata_json:JSON.stringify(baselineMetadata),documentation_version:baselineVersion};
   return env.DB.prepare(`INSERT INTO competitor_review_policies(package_name,state,scope,policy_version,semantic_fingerprint,metadata_json,documentation_text,decision_json,product_commit,reason,reviewed_by,confirmed_at)
     SELECT ?,?,?,?,?,?,?,?,?,?,?,? FROM competitor_registry WHERE package_name=? AND ${snapshot.sql}
     ON CONFLICT(package_name) DO UPDATE SET state=excluded.state,scope=excluded.scope,policy_version=excluded.policy_version,
@@ -83,7 +88,7 @@ export async function reviewPolicyStatement(env: Env, row: EvidenceRow, decision
     decision_json=excluded.decision_json,product_commit=excluded.product_commit,reason=excluded.reason,reviewed_by=excluded.reviewed_by,
     confirmed_at=excluded.confirmed_at,reopened_at=NULL,reopen_reason=NULL`)
     .bind(row.package_name, decision.relationship === 'noise' ? 'confirmed_noise' : 'active', REVIEW_SCOPE, REVIEW_POLICY_VERSION,
-      await semanticFingerprint(row), String(row.metadata_json), storedDocumentation(row), JSON.stringify(decision), productCommit,
+      await semanticFingerprint(baselineRow), JSON.stringify(baselineMetadata), storedDocumentation(baselineRow), JSON.stringify(decision), productCommit,
       decision.rationale, reviewedBy, stamp, row.package_name, ...snapshot.values);
 }
 

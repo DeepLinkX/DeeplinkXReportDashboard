@@ -438,3 +438,12 @@ Completed review-operation artifacts are immutable and stored in bounded UTF-8 c
 normalized evidence, review provenance, and metrics remain available independently of
 raw-response retention. Local snapshots and ledgers are optional offline recovery only.
 Do not create a full database export or repeat snapshot import to resume a review.
+
+A normal review start freezes unfinished Cloudflare candidates; unchanged examined gaps
+and confirmed noise are omitted. Protected GET of the operation namespace lists twenty
+operations using an indexed ID cursor. Legacy provenance restoration transfers only
+missing reviewer/time/origin sidecars; it does not collect package details.
+
+Review policies retain the version supported by the reviewed documentation as their
+baseline, separately from a newer observed publication. Finalization reopens only
+answers whose supporting evidence changed; metrics alone do not reopen them.

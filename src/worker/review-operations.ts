@@ -42,21 +42,51 @@ async function receipt(env:Env,id:string,key:string,body:unknown,work:()=>Promis
  await env.DB.prepare('UPDATE review_operation_receipts SET response_json=? WHERE operation_id=? AND receipt_key=?').bind(JSON.stringify(result),id,key).run();
  return result;
 }
+/** Freeze only unfinished Cloudflare candidates; unchanged examined gaps are reusable. */
+async function unfinishedNames(env:Env):Promise<string[]> {
+ const prior=await env.DB.prepare("SELECT id FROM review_operations WHERE status IN ('complete','complete_with_gaps') AND expected_packages IS NOT NULL ORDER BY updated_at DESC LIMIT 1").first<Row>();
+ const names:string[]=[];let cursor='';
+ for(;;){
+  const page=await env.DB.prepare(`SELECT cr.package_name,cr.relationship,cr.evidence_hash,rp.state,old.disposition AS old_disposition,old.evidence_hash AS old_hash FROM competitor_registry cr
+   LEFT JOIN competitor_review_policies rp ON rp.package_name=cr.package_name
+   LEFT JOIN review_operation_packages old ON old.operation_id=? AND old.package_name=cr.package_name
+   WHERE cr.package_name>? ORDER BY cr.package_name LIMIT 100`).bind(prior?.id??'',cursor).all<Row>();
+  if(!page.results.length)break;
+  for(const row of page.results)if(row.state!=='confirmed_noise' && ['unknown','direct','adjacent'].includes(row.relationship)
+   && (!row.state||row.state==='reopened') && !(row.old_disposition==='wait_for_evidence'&&row.old_hash===row.evidence_hash))names.push(row.package_name);
+  cursor=page.results.at(-1)!.package_name;
+  if(names.length>100000)throw new Error('Unfinished inventory exceeds operation budget.');
+ }
+ return names;
+}
+async function seedUnfinishedQuestions(env:Env,id:string):Promise<void> {
+ const op=await operation(env,id);
+ await env.DB.prepare(`INSERT OR IGNORE INTO review_operation_packages(operation_id,package_name,disposition,relationship,evidence_hash,previous_json,provenance_json,bootstrap_complete,updated_at)
+  SELECT ?,cr.package_name,'pending_review',cr.relationship,cr.evidence_hash,cr.analysis_json,'{"origin":"cloudflare_candidate"}',1,?
+  FROM json_each(?) names JOIN competitor_registry cr ON cr.package_name=names.value`).bind(id,stamp(),op.manifest_json).run();
+ await env.DB.prepare(`INSERT OR IGNORE INTO review_operation_questions(operation_id,package_name,question_key,lane,question,frozen_hash)
+  SELECT operation_id,package_name,'candidate','new_candidate','Examine the unfinished package-owned external-app capability using cached evidence.',evidence_hash
+  FROM review_operation_packages WHERE operation_id=? AND disposition='pending_review'`).bind(id).run();
+ const count=await env.DB.prepare("SELECT COUNT(*) AS n FROM review_operation_packages WHERE operation_id=? AND disposition='pending_review'").bind(id).first<Row>();
+ await event(env,id,'seed-unfinished',{packages:count?.n??0,questions:count?.n??0,pending_questions:count?.n??0});
+}
 export async function createReviewOperation(env:Env,key:string,body:Row):Promise<unknown> {
  if(!['cloudflare_first','cloudflare_only'].includes(body.evidence_mode??'cloudflare_first') || (body.apply_reviews!==undefined && typeof body.apply_reviews!=='boolean') || (body.expected_packages!==undefined && (!Number.isInteger(body.expected_packages)||body.expected_packages<1||body.expected_packages>100000))) throw new Error('Invalid operation options.');
+ const auto=body.package_names===undefined&&!/^(?:routine-metrics|observed-update):/.test(key);
  const id='review-'+(await sha256Hex(key)).slice(0,24);
  const existing=await env.DB.prepare('SELECT id FROM review_operations WHERE idempotency_key=?').bind(key).first();
- if(existing){const row=await operation(env,id);if(row.request_hash!==await sha256Hex(stableJson(body)))throw new Error('Idempotency key reused with different content.');return receipt(env,id,'create',body,async()=>{await seedExistingMembership(env,id);return reviewOperationStatus(env,id);});}
+ if(existing){const row=await operation(env,id);if(row.request_hash!==await sha256Hex(stableJson(body)))throw new Error('Idempotency key reused with different content.');return receipt(env,id,'create',body,async()=>{await seedExistingMembership(env,id);if(auto)await seedUnfinishedQuestions(env,id);return reviewOperationStatus(env,id);});}
  if(body.package_names && (!Array.isArray(body.package_names)||body.package_names.length>100000||new Set(body.package_names).size!==body.package_names.length||body.package_names.some((name:any)=>!validPackageName(name))))throw new Error('Invalid frozen package names.');
+ const frozen=auto?await unfinishedNames(env):body.package_names??[];
  await env.DB.prepare('INSERT OR IGNORE INTO review_operations(id,idempotency_key,request_hash,manifest_json,product_commit,policy_version,scope,evidence_mode,apply_reviews,stop_on_quota,inventory_json,expected_packages,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-  .bind(id,key,await sha256Hex(stableJson(body)),JSON.stringify(body.package_names??[]),catalog.source_commit,REVIEW_POLICY_VERSION,REVIEW_SCOPE,body.evidence_mode??'cloudflare_first',body.apply_reviews?1:0,body.stop_on_quota===false?0:1,JSON.stringify({id:catalog.catalog_version,product_commit:catalog.source_commit,capabilities:catalog.capabilities}),body.expected_packages??null,stamp(),stamp()).run();
- return receipt(env,id,'create',body,async()=>{await seedExistingMembership(env,id);return reviewOperationStatus(env,id);});
+  .bind(id,key,await sha256Hex(stableJson(body)),JSON.stringify(frozen),catalog.source_commit,REVIEW_POLICY_VERSION,REVIEW_SCOPE,body.evidence_mode??'cloudflare_first',body.apply_reviews?1:0,body.stop_on_quota===false?0:1,JSON.stringify({id:catalog.catalog_version,product_commit:catalog.source_commit,capabilities:catalog.capabilities}),body.expected_packages??(auto?frozen.length:null),stamp(),stamp()).run();
+ return receipt(env,id,'create',body,async()=>{await seedExistingMembership(env,id);if(auto)await seedUnfinishedQuestions(env,id);return reviewOperationStatus(env,id);});
 }
 async function seedExistingMembership(env:Env,id:string):Promise<void> {
  const op=await operation(env,id);if(!parse(op.manifest_json,[]).length)return;
  await env.DB.prepare(`INSERT OR IGNORE INTO review_operation_packages(operation_id,package_name,disposition,relationship,evidence_hash,provenance_json,import_status,bootstrap_complete,updated_at)
  SELECT ?,cr.package_name,CASE WHEN rp.state='confirmed_noise' THEN 'excluded_noise' ELSE 'reuse' END,
- cr.relationship,cr.evidence_hash,json_object('origin','production_policy','reviewed_by',rp.reviewed_by,'reviewed_at',rp.confirmed_at),'reused',1,?
+ json_extract(rp.decision_json,'$.relationship'),cr.evidence_hash,json_object('origin','production_policy','reviewed_by',rp.reviewed_by,'policy_confirmed_at',rp.confirmed_at),'reused',1,?
  FROM json_each(?) names JOIN competitor_registry cr ON cr.package_name=names.value JOIN competitor_review_policies rp ON rp.package_name=cr.package_name
  WHERE rp.scope=? AND (rp.state='confirmed_noise' OR (rp.state='active' AND rp.product_commit=? AND rp.policy_version=?))`)
  .bind(id,stamp(),op.manifest_json,REVIEW_SCOPE,op.product_commit,REVIEW_POLICY_VERSION).run();
@@ -94,7 +124,7 @@ async function question(env:Env,id:string,name:string,key:string,lane:string,tex
  await event(env,id,`question:${name}:${key}`,{pending_questions:1,questions:1});
  await env.DB.prepare("UPDATE review_operation_packages SET disposition='pending_review' WHERE operation_id=? AND package_name=?").bind(id,name).run();
 }
-export async function bootstrapReviewOperation(env:Env,id:string,body:{packages:BootstrapRecord[];inventory?:Row;metrics_only?:boolean}):Promise<unknown> {
+export async function bootstrapReviewOperation(env:Env,id:string,body:{packages:BootstrapRecord[];inventory?:Row;metrics_only?:boolean;provenance_only?:boolean}):Promise<unknown> {
  const op=await mutable(env,id);
  const frozenNames=new Set(parse(op.manifest_json,[]));
  if(frozenNames.size && body.packages?.some(p=>!frozenNames.has(p.package_name)))throw new Error('Package outside frozen inventory.');
@@ -106,6 +136,11 @@ export async function bootstrapReviewOperation(env:Env,id:string,body:{packages:
  const results=[];
  for(const record of body.packages) {
   const name=record.package_name;if(!validPackageName(name)) throw new Error('Invalid package name.');
+  if(body.provenance_only){
+   const provenance=record.provenance;if(!provenance||typeof provenance.reviewed_by!=='string'||typeof provenance.origin!=='string'||(provenance.reviewed_at&&!Number.isFinite(Date.parse(provenance.reviewed_at)))||JSON.stringify(provenance).length>8000)throw new Error('Invalid original review provenance.');
+   const result=await env.DB.prepare("UPDATE review_operation_packages SET provenance_json=json_patch(provenance_json,?) WHERE operation_id=? AND package_name=? AND json_extract(provenance_json,'$.source_review_sha256') IS NULL").bind(JSON.stringify(provenance),id,name).run();
+   results.push({package_name:name,status:result.meta.changes?'original_provenance_restored':'provenance_reused'});continue;
+  }
   if(body.metrics_only){const member=await env.DB.prepare('SELECT package_name FROM review_operation_packages WHERE operation_id=? AND package_name=?').bind(id,name).first();if(!member)throw new Error('Metrics restoration requires existing membership.');await restoreLegacyMetrics(env,id,record,await env.DB.prepare('SELECT * FROM competitor_registry WHERE package_name=?').bind(name).first<Row>());results.push({package_name:name,status:'legacy_metrics_reconciled'});continue;}
   const prior=await env.DB.prepare('SELECT disposition,bootstrap_complete FROM review_operation_packages WHERE operation_id=? AND package_name=?').bind(id,name).first<Row>();
   if(prior?.bootstrap_complete){results.push({package_name:name,status:'reused_membership'});continue;}
@@ -160,7 +195,7 @@ export async function claimReviewPacket(env:Env,id:string,key:string,body:Row):P
  const reviewer=body.reviewer;if(typeof reviewer!=='string'||!reviewer.trim()||reviewer.length>120) throw new Error('Reviewer identity required.');
  const lease=`${reviewer}:${key}`;
  const claimed=await env.DB.prepare('SELECT DISTINCT package_name FROM review_operation_questions WHERE operation_id=? AND lease_key=? AND status=\'claimed\' ORDER BY package_name LIMIT 5').bind(id,lease).all<Row>();
- const available=claimed.results.length?claimed:await env.DB.prepare("SELECT DISTINCT package_name FROM review_operation_questions WHERE operation_id=? AND (status='pending' OR (status='claimed' AND lease_until<?)) ORDER BY package_name LIMIT 5").bind(id,stamp()).all<Row>();
+ const available=claimed.results.length?claimed:await env.DB.prepare("SELECT DISTINCT q.package_name FROM review_operation_questions q JOIN review_operation_packages p ON p.operation_id=q.operation_id AND p.package_name=q.package_name WHERE q.operation_id=? AND (q.status='pending' OR (q.status='claimed' AND q.lease_until<?)) AND (p.lease_key IS NULL OR p.lease_until<? OR p.lease_key=?) ORDER BY q.package_name LIMIT 5").bind(id,stamp(),stamp(),lease).all<Row>();
  const packets=[];
  for(const {package_name:name} of available.results) {
   const locked=await env.DB.prepare('UPDATE review_operation_packages SET lease_key=?,lease_until=? WHERE operation_id=? AND package_name=? AND (lease_key IS NULL OR lease_key=? OR lease_until<?)').bind(lease,new Date(Date.now()+1800000).toISOString(),id,name,lease,stamp()).run();
@@ -359,10 +394,11 @@ export async function submitReviewResults(env:Env,id:string,body:Row):Promise<un
     await importReview(env,result.envelope);importStatus='imported';disposition=relation==='noise'?'excluded_noise':'reviewed';
    } else disposition=relation==='unknown'?'wait_for_evidence':'reviewed_draft';
   } else if(typeof result.unresolved_reason!=='string'||!result.unresolved_reason.trim())throw new Error('Unresolved answers require a concrete evidence gap.');
-  await env.DB.prepare('UPDATE review_operation_packages SET disposition=?,relationship=?,result_json=?,import_status=?,updated_at=? WHERE operation_id=? AND package_name=?').bind(disposition,relation,JSON.stringify(result),importStatus,stamp(),id,name).run();
+  await env.DB.prepare('UPDATE review_operation_packages SET disposition=?,relationship=?,result_json=?,import_status=?,evidence_hash=?,updated_at=? WHERE operation_id=? AND package_name=?').bind(disposition,relation,JSON.stringify(result),importStatus,row?.evidence_hash??null,stamp(),id,name).run();
   for(const q of qs.results) {
    await event(env,id,`answer:${name}:${q.question_key}`,{pending_questions:-1,answered_questions:1},[env.DB.prepare("UPDATE review_operation_questions SET status='answered',answer_json=? WHERE operation_id=? AND package_name=? AND question_key=? AND lease_key=?").bind(JSON.stringify({finding:result.finding,sources:result.sources,unresolved_reason:result.unresolved_reason??null}),id,name,q.question_key,body.lease_key)]);
   }
+  await env.DB.prepare('UPDATE review_operation_packages SET lease_key=NULL,lease_until=NULL WHERE operation_id=? AND package_name=? AND lease_key=?').bind(id,name,body.lease_key).run();
   await event(env,id,`review:${name}`,{newly_reviewed:1,[`result_${relation}`]:1,[`imports_${importStatus}`]:1});
   if(['direct','adjacent'].includes(relation))await scheduleReviewResource(env,id,name,'metrics');
   results.push({package_name:name,status:disposition,import_status:importStatus});
@@ -378,6 +414,8 @@ export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promis
   return {scheduled:rows.results.length,cursor:rows.results.at(-1)?.package_name??null,done:rows.results.length<100};
  }
  if(body.resume){await kickReviewResources(env,id,true);return reviewOperationStatus(env,id);}
+ const changed=await env.DB.prepare('SELECT p.package_name,cr.evidence_hash FROM review_operation_packages p JOIN competitor_registry cr ON cr.package_name=p.package_name WHERE p.operation_id=? AND p.result_json IS NOT NULL AND p.evidence_hash IS NOT cr.evidence_hash ORDER BY p.package_name LIMIT 10').bind(id).all<Row>();
+ if(changed.results.length){for(const row of changed.results)await question(env,id,row.package_name,`evidence-change:${row.evidence_hash}`,'evidence_conflict','Supporting evidence changed after the answer. Examine only the changed claim.',row.evidence_hash);throw new Error(`Evidence changed for ${changed.results.length} answered packages; targeted questions reopened.`);}
  const counters=parse(op.counters_json);
  if(op.expected_packages && counters.packages!==op.expected_packages)throw new Error(`Frozen membership incomplete: ${counters.packages??0}/${op.expected_packages}.`);
  if((counters.pending_questions??0)>0||(counters.pending_resources??0)>0)throw new Error(`Unfinished work: ${counters.pending_questions??0} questions, ${counters.pending_resources??0} resources.`);
@@ -393,12 +431,14 @@ export async function materializeReviewReport(env:Env,id:string):Promise<void> {
  const totals:Record<string,number>={};const rows:Row[]=[];let cursor='';
  for(;;){const page=await env.DB.prepare(`SELECT p.*,cr.downloads_30d,cr.likes,cr.points,cr.max_points,cr.metrics_captured_at,cr.metadata_json,cr.score_json,cr.analysis_json FROM review_operation_packages p LEFT JOIN competitor_registry cr ON cr.package_name=p.package_name WHERE p.operation_id=? AND p.package_name>? ORDER BY p.package_name LIMIT 100`).bind(id,cursor).all<Row>();
   if(!page.results.length)break;
-  for(const r of page.results){totals[r.relationship]=(totals[r.relationship]??0)+1;rows.push(r);}cursor=page.results.at(-1)!.package_name;
+  for(const r of page.results){if(r.disposition==='excluded_noise')r.relationship='noise';totals[r.relationship]=(totals[r.relationship]??0)+1;rows.push(r);}cursor=page.results.at(-1)!.package_name;
  }
  const direct=rows.filter(r=>r.relationship==='direct').sort((a,b)=>Number(a.downloads_30d==null)-Number(b.downloads_30d==null)||(b.downloads_30d??0)-(a.downloads_30d??0)||a.package_name.localeCompare(b.package_name));
- const expansions=rows.filter(r=>r.relationship==='unknown'||r.relationship==='adjacent'||parse(r.analysis_json).expansion).sort((a,b)=>Number(a.downloads_30d==null)-Number(b.downloads_30d==null)||(b.downloads_30d??0)-(a.downloads_30d??0)||a.package_name.localeCompare(b.package_name));
+ const expansions=rows.filter(r=>r.relationship!=='noise'&&(r.relationship==='unknown'||r.relationship==='adjacent'||parse(r.analysis_json).expansion)).sort((a,b)=>Number(a.downloads_30d==null)-Number(b.downloads_30d==null)||(b.downloads_30d??0)-(a.downloads_30d??0)||a.package_name.localeCompare(b.package_name));
  const metricCoverage=rows.filter(r=>['direct','adjacent'].includes(r.relationship));
- const info={id,product_commit:op.product_commit,counters,totals,metrics:{eligible:metricCoverage.length,downloads_observed:metricCoverage.filter(r=>r.downloads_30d!==null).length},notes};
+ const dispositions=rows.reduce((counts:Record<string,number>,r)=>{counts[r.disposition]=(counts[r.disposition]??0)+1;return counts;},{});
+ const origins=rows.reduce((counts:Record<string,number>,r)=>{const origin=parse(r.provenance_json).origin??'unrecorded';counts[origin]=(counts[origin]??0)+1;return counts;},{});
+ const info={id,product_commit:op.product_commit,counters,totals,dispositions,origins,coverage:{discovered:rows.length,enriched:rows.filter(r=>parse(r.metadata_json).version).length,newly_inspected:counters.newly_reviewed??0,reused:rows.filter(r=>['reused','reconciled_reuse'].includes(r.import_status)).length,excluded_noise:rows.filter(r=>r.disposition==='excluded_noise').length,unresolved:totals.unknown??0},metrics:{eligible:metricCoverage.length,downloads_observed:metricCoverage.filter(r=>r.downloads_30d!==null).length},notes};
  const lines=[`# DeeplinkX competitor review ${id}`,'',`Product commit: ${op.product_commit}`,'',`Coverage: ${rows.length} identities. Rankings are among packages with observed downloads; missing values are last.`,'',`Totals: ${Object.entries(totals).map(([k,v])=>`${k}: ${v}`).join(', ')}.`,'','## Review and opportunity findings','',notes.summary??'',...Object.entries(notes).filter(([key])=>key!=='summary').map(([key,v])=>`\n### ${key}\n\n${typeof v==='string'?v:JSON.stringify(v,null,2)}`),'','## Top direct competitors','',...direct.slice(0,10).map(r=>`- [${r.package_name}](https://pub.dev/packages/${r.package_name}): downloads ${r.downloads_30d??'unavailable'}; observed ${r.metrics_captured_at??'unavailable'}`),'','## Top expansion/review candidates','',...expansions.slice(0,10).map(r=>`- [${r.package_name}](https://pub.dev/packages/${r.package_name}): downloads ${r.downloads_30d??'unavailable'}; observed ${r.metrics_captured_at??'unavailable'}`),'','## Relevant and unresolved package accounting','','| Package | Relationship | Disposition | Downloads | Likes | Points | Observed |','|---|---|---|---:|---:|---|---|',...rows.filter(r=>r.relationship!=='noise').map(r=>`| ${r.package_name} | ${r.relationship} | ${r.disposition} | ${r.downloads_30d??'—'} | ${r.likes??'—'} | ${r.points??'—'}/${r.max_points??'—'} | ${r.metrics_captured_at??'—'} |`),'',`Noise: ${totals.noise??0} excluded identities; names/dispositions are available in JSON/CSV without noise metrics.`];
  const exported=rows.map(r=>r.relationship==='noise'?{package_name:r.package_name,relationship:'noise',disposition:r.disposition,origin:parse(r.provenance_json).origin??'production_policy'}:{package_name:r.package_name,relationship:r.relationship,disposition:r.disposition,import_status:r.import_status,metrics:{downloads_30d:r.downloads_30d,likes:r.likes,points:r.points,max_points:r.max_points,observed_at:r.metrics_captured_at},version:parse(r.metadata_json).version??null,published_at:parse(r.metadata_json).published??null,metric_field_dates:parse(r.score_json).field_observed_at??{},analysis:parse(r.analysis_json),original_relationship:parse(r.provenance_json).original_relationship??r.relationship,previous_decision:parse(r.previous_json),result:parse(r.result_json,null),provenance:parse(r.provenance_json)});
  const contents={markdown:lines.join('\n')+'\n',json:JSON.stringify({...info,packages:exported}),csv:['package,relationship,disposition,downloads,likes,points,max_points,observed',...rows.map(r=>[r.package_name,r.relationship,r.disposition,...(r.relationship==='noise'?['','','','','']:[r.downloads_30d,r.likes,r.points,r.max_points,r.metrics_captured_at])].map(csv).join(','))].join('\n')+'\n'};
@@ -418,9 +458,11 @@ async function requestBody(request:Request):Promise<Row>{if(Number(request.heade
 export async function handleReviewOperations(request:Request,env:Env,path:string,key:string):Promise<Response> {
  try {
   const suffix=path.slice(namespace.length).replace(/^\//,'');
+  if(!suffix&&request.method==='GET'){const after=new URL(request.url).searchParams.get('after_id')??'';if(after.length>80)throw new Error('Invalid operation cursor.');const rows=await env.DB.prepare('SELECT id,status,scope,product_commit,apply_reviews,counters_json,updated_at FROM review_operations WHERE id>? ORDER BY id LIMIT 20').bind(after).all<Row>();return json({operations:rows.results.map(r=>({...r,counters:parse(r.counters_json),counters_json:undefined})),next_cursor:rows.results.length===20?rows.results.at(-1)?.id:null});}
   if(!suffix&&request.method==='POST')return json(await createReviewOperation(env,key,await requestBody(request)));
   const [id,action]=suffix.split('/');if(!id||!/^[a-z0-9-]{1,80}$/.test(id))return json({error:'Invalid operation ID'},400);
   if(request.method==='GET'&&!action){
+   if(new URL(request.url).searchParams.get('provenance_missing')==='1')return json({package_names:(await env.DB.prepare("SELECT package_name FROM review_operation_packages WHERE operation_id=? AND json_extract(provenance_json,'$.source_review_sha256') IS NULL ORDER BY package_name").bind(id).all<Row>()).results.map(r=>r.package_name)});
    if(new URL(request.url).searchParams.get('metrics_missing')==='1')return json({package_names:(await env.DB.prepare("SELECT p.package_name FROM review_operation_packages p JOIN competitor_registry cr ON cr.package_name=p.package_name WHERE p.operation_id=? AND p.relationship IN ('direct','adjacent') AND (cr.downloads_30d IS NULL OR cr.likes IS NULL OR cr.points IS NULL OR cr.max_points IS NULL) ORDER BY p.package_name").bind(id).all<Row>()).results.map(r=>r.package_name)});
    if(new URL(request.url).searchParams.get('membership')==='1')return json({package_names:(await env.DB.prepare('SELECT package_name FROM review_operation_packages WHERE operation_id=? AND bootstrap_complete=1 ORDER BY package_name').bind(id).all<Row>()).results.map(r=>r.package_name)});
    return json(await reviewOperationStatus(env,id));
