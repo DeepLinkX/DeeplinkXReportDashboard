@@ -191,7 +191,9 @@ def run(args):
     if args.command == 'status':
         return request(token, suffix)
     if args.command == 'report':
-        content = request(token, suffix + '/report?format=' + args.format)
+        revision=getattr(args,'revision',None)
+        if revision is not None and not 1<=revision<=1000:raise ValueError('Report revision must be between 1 and 1000.')
+        content = request(token, suffix + '/report?format=' + args.format + (('&revision='+str(revision)) if revision is not None else ''))
         if args.output:
             Path(args.output).write_bytes(content)
             return {'saved': str(Path(args.output).resolve()), 'bytes': len(content)}
@@ -273,6 +275,7 @@ def main(argv=None):
     parser.add_argument('--batch-size',type=int,choices=range(1,11),default=10,help='Bounded provenance upload size; reduce on constrained connections')
     parser.add_argument('--provenance-only',action='store_true',help='One-time restoration of missing original reviewer/date/origin; no evidence bodies')
     parser.add_argument('--format', choices=['markdown','json','csv'], default='markdown')
+    parser.add_argument('--revision',type=int,help='Optional immutable report revision; omitted means the original artifact')
     parser.add_argument('--output')
     args = parser.parse_args(argv)
     try:

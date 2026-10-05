@@ -58,6 +58,13 @@ class RemoteTests(unittest.TestCase):
                 result=remote.run(self.args('report',output=str(output)))
                 self.assertEqual(output.read_bytes(),b'report');self.assertEqual(result['bytes'],6)
 
+    def test_report_revision_is_explicit_and_validated(self):
+        with patch.object(remote,'token_from',return_value='secret'),patch.object(remote,'request',return_value=b'report') as call,patch('sys.stdout',new_callable=io.StringIO):
+            remote.run(self.args('report',revision=2));self.assertEqual(call.call_args.args[1],'/review-test/report?format=markdown&revision=2')
+        with patch.object(remote,'token_from',return_value='secret'),patch.object(remote,'request') as call:
+            with self.assertRaises(ValueError):remote.run(self.args('report',revision=0))
+            call.assert_not_called()
+
 if __name__=='__main__': unittest.main()
 
 class OutputTests(unittest.TestCase):

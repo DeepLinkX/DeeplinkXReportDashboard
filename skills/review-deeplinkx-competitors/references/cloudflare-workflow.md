@@ -66,6 +66,8 @@ Reports include every frozen identity, minimal noise accounting, relevant metric
 
 Finalization can return `reconciling` while bounded legacy membership records are repaired using already-saved answers bound to the current hash. Repeat finalization with a new key until it reaches the normal gates. These repairs reuse answers; genuinely changed evidence still opens a named question. Do not attach a current hash to different evidence or repeat semantic review for a proven bookkeeping mismatch.
 
+An explicit correction of completed bookkeeping labels uses `remote finalize --operation review-ID --body -` with `{"amend_dispositions":true,"reason":"Already-imported answers retain stale pending labels.","notes":{"ranking":"Examined ranking clarification"}}`. Only proven imported answers qualify, at most ten per amendment. Read the immutable result with `remote report --operation review-ID --revision 2 --format markdown --output /optional/export/revised.md` and normal credential arguments. Original exports remain unchanged. If rendering is interrupted, repeat the amendment request with `"resume":true` and a new key. This is a report correction, not permission to reopen noise or repeat completed review work.
+
 ## Explicit offline recovery
 
 Only when requested, existing `collect/select/prepare/reuse/validate/ledger/render` commands may read an existing frozen SQLite snapshot and write exports outside repositories. No fresh full D1 export or re-import is implied. Local evidence must retain its original snapshot/version and is reconciled before any production import. Offline results are not automatically current Cloudflare decisions. No mandatory noise controls or forty-package cap apply to a requested full review.

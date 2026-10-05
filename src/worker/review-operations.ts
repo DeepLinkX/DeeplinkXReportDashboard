@@ -96,7 +96,8 @@ async function seedExistingMembership(env:Env,id:string):Promise<void> {
 export async function reviewOperationStatus(env:Env,id:string):Promise<unknown> {
  const op=await operation(env,id);
  const blockers=await env.DB.prepare("SELECT package_name,kind,status,attempts,retry_at,error FROM review_operation_resources WHERE operation_id=? AND status IN ('pending','captured') ORDER BY retry_at,package_name LIMIT 5").bind(id).all<Row>();
- return {blockers:blockers.results,id,status:op.status,scope:op.scope,product_commit:op.product_commit,policy_version:op.policy_version,evidence_mode:op.evidence_mode,apply_reviews:Boolean(op.apply_reviews),stop_on_quota:Boolean(op.stop_on_quota),resource_dispatch:op.resource_dispatch,expected_packages:op.expected_packages,counters:parse(op.counters_json),retry_at:op.retry_at,updated_at:op.updated_at};
+ const notes=parse(op.notes_json);
+ return {blockers:blockers.results,id,status:op.status,report_revision:notes.report_revision??1,amendment_status:notes.report_amendment?.status??null,scope:op.scope,product_commit:op.product_commit,policy_version:op.policy_version,evidence_mode:op.evidence_mode,apply_reviews:Boolean(op.apply_reviews),stop_on_quota:Boolean(op.stop_on_quota),resource_dispatch:op.resource_dispatch,expected_packages:op.expected_packages,counters:parse(op.counters_json),retry_at:op.retry_at,updated_at:op.updated_at};
 }
 interface BootstrapRecord {
  package_name:string; decision?:PackageAnalysis; provenance?:Row; evidence?:Row;
@@ -412,7 +413,23 @@ export async function submitReviewResults(env:Env,id:string,body:Row):Promise<un
  return {results};
 }
 export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promise<unknown> {
- const op=await operation(env,id);if(finalStates.includes(op.status))return reviewOperationStatus(env,id);
+ const op=await operation(env,id);
+ if(body.amend_dispositions){
+  const notes=parse(op.notes_json);
+  if(!finalStates.includes(op.status)&&!(body.resume&&op.status==='quota_deferred'&&finalStates.includes(notes.report_amendment?.source_status)))throw new Error('Disposition amendments require a completed report.');
+  if(typeof body.reason!=='string'||!body.reason.trim()||body.reason.length>5000)throw new Error('An amendment reason is required.');
+  if(body.notes&&JSON.stringify(body.notes).length>100000)throw new Error('Report notes exceed bounded size.');
+  if(notes.report_amendment?.status==='pending'){if(body.resume){await env.DB.prepare('UPDATE review_operations SET status=? WHERE id=?').bind(notes.report_amendment.source_status,id).run();await env.SCAN_QUEUE.send({kind:'review-finalize',operationId:id,revision:notes.report_amendment.revision,stopOnQuota:Boolean(op.stop_on_quota)});}return {id,status:'amending',revision:notes.report_amendment.revision};}
+  const rows=await env.DB.prepare("SELECT package_name,relationship FROM review_operation_packages WHERE operation_id=? AND disposition='pending_review' AND import_status='imported' AND json_extract(result_json,'$.envelope.evidence_hash')=evidence_hash AND json_extract(result_json,'$.envelope.product_commit')=? ORDER BY package_name LIMIT 10").bind(id,op.product_commit).all<Row>();
+  if(!rows.results.length)throw new Error('No proven completed dispositions require amendment.');
+  const changes=rows.results.map(r=>({package_name:r.package_name,disposition:r.relationship==='noise'?'excluded_noise':'reviewed'}));
+  const revision=(notes.report_revision??1)+1;
+  notes.report_amendment={status:'pending',source_status:op.status,revision,source_revision:notes.report_revision??1,changes,reason:body.reason,notes:body.notes??{}};
+  await env.DB.prepare('UPDATE review_operations SET notes_json=? WHERE id=?').bind(JSON.stringify(notes),id).run();
+  await env.SCAN_QUEUE.send({kind:'review-finalize',operationId:id,revision,stopOnQuota:Boolean(op.stop_on_quota)});
+  return {id,status:'amending',revision,corrected_labels:changes.length};
+ }
+ if(finalStates.includes(op.status))return reviewOperationStatus(env,id);
  if(body.notes_only){await mutable(env,id);if(!body.notes)throw new Error('Notes-only requests require report notes.');}
  if(body.notes){if(JSON.stringify(body.notes).length>100000)throw new Error('Report notes exceed bounded size.');await env.DB.prepare('UPDATE review_operations SET notes_json=json_patch(notes_json,?) WHERE id=?').bind(JSON.stringify(body.notes),id).run();}
  if(body.notes_only)return reviewOperationStatus(env,id);
@@ -430,7 +447,7 @@ export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promis
  (json_extract(p.result_json,'$.envelope') IS NULL AND EXISTS(SELECT 1 FROM review_operation_questions q WHERE q.operation_id=p.operation_id AND q.package_name=p.package_name AND q.status='answered' AND q.frozen_hash=cr.evidence_hash))) ORDER BY p.package_name LIMIT 5`).bind(id).all<Row>();
  if(bindings.results.length){
   for(const row of bindings.results){
-   await env.DB.prepare('UPDATE review_operation_packages SET evidence_hash=? WHERE operation_id=? AND package_name=?').bind(row.evidence_hash,id,row.package_name).run();
+   await env.DB.prepare("UPDATE review_operation_packages SET evidence_hash=?,disposition=CASE WHEN import_status='imported' THEN CASE WHEN relationship='noise' THEN 'excluded_noise' ELSE 'reviewed' END WHEN relationship='unknown' THEN 'wait_for_evidence' ELSE disposition END WHERE operation_id=? AND package_name=?").bind(row.evidence_hash,id,row.package_name).run();
    const qs=await env.DB.prepare("SELECT question_key FROM review_operation_questions WHERE operation_id=? AND package_name=? AND question_key=? AND status IN ('pending','claimed')").bind(id,row.package_name,`evidence-change:${row.evidence_hash}`).all<Row>();
    for(const q of qs.results)await event(env,id,`answer:${row.package_name}:${q.question_key}`,{pending_questions:-1,answered_questions:1},[env.DB.prepare("UPDATE review_operation_questions SET status='answered',answer_json=? WHERE operation_id=? AND package_name=? AND question_key=?").bind(JSON.stringify({finding:'Saved answer already binds to current evidence; membership bookkeeping reconciled without another review.',origin:'binding_reuse'}),id,row.package_name,q.question_key)]);
    await event(env,id,`binding-reuse:${row.package_name}:${row.evidence_hash}`,{reused_answer_bindings:1});
@@ -442,12 +459,52 @@ export async function finalizeReviewOperation(env:Env,id:string,body:Row):Promis
  const counters=parse(op.counters_json);
  if(op.expected_packages && counters.packages!==op.expected_packages)throw new Error(`Frozen membership incomplete: ${counters.packages??0}/${op.expected_packages}.`);
  if((counters.pending_questions??0)>0||(counters.pending_resources??0)>0)throw new Error(`Unfinished work: ${counters.pending_questions??0} questions, ${counters.pending_resources??0} resources.`);
+ const unfinished=await env.DB.prepare("SELECT package_name FROM review_operation_packages WHERE operation_id=? AND disposition IN ('pending_review','pending_evidence') ORDER BY package_name LIMIT 1").bind(id).first<Row>();
+ if(unfinished)throw new Error(`Unfinished package disposition: ${unfinished.package_name}.`);
  await env.DB.prepare("UPDATE review_operations SET status='finalizing' WHERE id=?").bind(id).run();
  await env.SCAN_QUEUE.send({kind:'review-finalize',operationId:id,stopOnQuota:Boolean(op.stop_on_quota)});
  return {id,status:'finalizing'};
 }
 function csv(value:any){const s=String(value??'');return '"'+s.replaceAll('"','""')+'"';}
-export async function materializeReviewReport(env:Env,id:string):Promise<void> {
+async function readArtifact(env:Env,id:string,format:string):Promise<string>{
+ const chunks=await env.DB.prepare('SELECT content,content_hash FROM review_operation_artifacts WHERE operation_id=? AND format=? ORDER BY chunk_index LIMIT 61').bind(id,format).all<Row>();
+ if(!chunks.results.length)throw new Error('Source artifact is unavailable.');
+ if(chunks.results.length>60||chunks.results.reduce((bytes,c)=>bytes+new TextEncoder().encode(c.content).length,0)>15000000)throw new Error('Source artifact exceeds the bounded 15 MB amendment size.');
+ for(const chunk of chunks.results)if(await sha256Hex(chunk.content)!==chunk.content_hash)throw new Error('Artifact hash mismatch.');
+ return chunks.results.map(c=>c.content).join('');
+}
+async function writeRevision(env:Env,id:string,format:string,content:string):Promise<void>{
+ const encoded=new TextEncoder().encode(content),decoder=new TextDecoder();let offset=0,index=0;
+ do{let end=Math.min(encoded.length,offset+256000);while(end<encoded.length&&(encoded[end]&0xc0)===0x80)end--;const part=decoder.decode(encoded.slice(offset,end));
+  const existing=await env.DB.prepare('SELECT content_hash FROM review_operation_artifacts WHERE operation_id=? AND format=? AND chunk_index=?').bind(id,format,index).first<Row>();
+  const hash=await sha256Hex(part);if(existing&&existing.content_hash!==hash)throw new Error('Immutable revision conflicts with saved content.');
+  if(!existing)await env.DB.prepare('INSERT INTO review_operation_artifacts VALUES(?,?,?,?,?,?)').bind(id,format,index,part,hash,stamp()).run();offset=end;index++;
+ }while(offset<encoded.length);
+}
+async function materializeDispositionAmendment(env:Env,id:string,revision:number):Promise<void>{
+ const op=await operation(env,id),notes=parse(op.notes_json),amendment=notes.report_amendment;
+ if(!amendment||amendment.revision!==revision)throw new Error('Unknown report amendment.');
+ if(amendment.status==='complete')return;
+ const suffix=amendment.source_revision===1?'':`:r${amendment.source_revision}`;
+ const report=JSON.parse(await readArtifact(env,id,'json'+suffix));
+ const changed=new Map<string,string>(amendment.changes.map((r:Row)=>[r.package_name,r.disposition]));
+ for(const row of report.packages){if(changed.has(row.package_name)){if(row.disposition!=='pending_review')throw new Error('Amendment source disposition changed.');row.disposition=changed.get(row.package_name);}}
+ if(report.packages.filter((r:Row)=>changed.has(r.package_name)).length!==changed.size)throw new Error('Amendment package is missing from frozen report.');
+ report.dispositions={};for(const row of report.packages)report.dispositions[row.disposition]=(report.dispositions[row.disposition]??0)+1;
+ report.coverage.excluded_noise=report.packages.filter((r:Row)=>r.disposition==='excluded_noise').length;
+ report.notes={...report.notes,...amendment.notes};report.revision=revision;report.amendment={reason:amendment.reason,changes:amendment.changes};
+ let markdown=await readArtifact(env,id,'markdown'+suffix);
+ for(const change of amendment.changes)markdown=markdown.replace(`| ${change.package_name} | adjacent | pending_review |`,`| ${change.package_name} | adjacent | ${change.disposition} |`);
+ markdown+=`\n## Report amendment ${revision}\n\n${amendment.reason}\n\n${amendment.changes.map((r:Row)=>`- ${r.package_name}: ${r.disposition}.`).join('\n')}\n`;
+ for(const [key,value] of Object.entries(amendment.notes))markdown+=`\n### ${key}\n\n${typeof value==='string'?value:JSON.stringify(value,null,2)}\n`;
+ const contents={json:JSON.stringify(report),markdown,csv:['package,relationship,disposition,downloads,likes,points,max_points,observed',...report.packages.map((r:Row)=>[r.package_name,r.relationship,r.disposition,...(r.relationship==='noise'?['','','','','']:[r.metrics.downloads_30d,r.metrics.likes,r.metrics.points,r.metrics.max_points,r.metrics.observed_at])].map(csv).join(','))].join('\n')+'\n'};
+ for(const [format,content] of Object.entries(contents))await writeRevision(env,id,`${format}:r${revision}`,content);
+ for(const change of amendment.changes)await env.DB.prepare("UPDATE review_operation_packages SET disposition=? WHERE operation_id=? AND package_name=? AND disposition='pending_review' AND import_status='imported'").bind(change.disposition,id,change.package_name).run();
+ notes.report_revision=revision;notes.report_amendment={...amendment,status:'complete'};
+ await env.DB.prepare('UPDATE review_operations SET notes_json=?,status=?,updated_at=? WHERE id=?').bind(JSON.stringify(notes),amendment.source_status,stamp(),id).run();
+}
+export async function materializeReviewReport(env:Env,id:string,revision?:number):Promise<void> {
+ if(revision!==undefined){await materializeDispositionAmendment(env,id,revision);return;}
  const op=await operation(env,id);if(finalStates.includes(op.status))return;
  const notes=parse(op.notes_json);const counters=parse(op.counters_json);
  const resources:Row[]=[];let resourceCursor=['','',''];
@@ -499,7 +556,11 @@ export async function handleReviewOperations(request:Request,env:Env,path:string
   if(request.method==='GET'&&action==='report') {
    const op=await operation(env,id);if(!finalStates.includes(op.status))return json({error:'Report is not complete.'},409);
    const format=new URL(request.url).searchParams.get('format')??'markdown';if(!['markdown','json','csv'].includes(format))throw new Error('Invalid report format.');
-   const stream=new ReadableStream({async start(controller){let index=0;try{for(;;){const part=await env.DB.prepare('SELECT content,content_hash FROM review_operation_artifacts WHERE operation_id=? AND format=? AND chunk_index=?').bind(id,format,index++).first<Row>();if(!part)break;if(await sha256Hex(part.content)!==part.content_hash)throw new Error('Artifact hash mismatch.');controller.enqueue(new TextEncoder().encode(part.content));}controller.close();}catch(error){controller.error(error);}}});
+   const revision=new URL(request.url).searchParams.get('revision');if(revision!==null&&(!/^[1-9][0-9]*$/.test(revision)||Number(revision)>1000))throw new Error('Invalid report revision.');
+   if(revision&&Number(revision)>(parse(op.notes_json).report_revision??1))return json({error:'Report revision is not complete.'},409);
+   const artifactFormat=revision&&revision!=='1'?`${format}:r${revision}`:format;
+   if(!(await env.DB.prepare('SELECT 1 FROM review_operation_artifacts WHERE operation_id=? AND format=? LIMIT 1').bind(id,artifactFormat).first()))return json({error:'Report revision is not complete.'},409);
+   const stream=new ReadableStream({async start(controller){let index=0;try{for(;;){const part=await env.DB.prepare('SELECT content,content_hash FROM review_operation_artifacts WHERE operation_id=? AND format=? AND chunk_index=?').bind(id,artifactFormat,index++).first<Row>();if(!part)break;if(await sha256Hex(part.content)!==part.content_hash)throw new Error('Artifact hash mismatch.');controller.enqueue(new TextEncoder().encode(part.content));}controller.close();}catch(error){controller.error(error);}}});
    return new Response(stream,{headers:{'cache-control':'no-store','content-type':format==='json'?'application/json':format==='csv'?'text/csv; charset=utf-8':'text/markdown; charset=utf-8'}});
   }
   if(request.method!=='POST')return json({error:'Unsupported operation route'},404);

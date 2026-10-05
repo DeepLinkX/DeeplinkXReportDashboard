@@ -199,3 +199,24 @@ it('repairs a stale membership hash only when the saved answer is already bound 
  const status=await reviewOperationStatus(env,o.id) as any;expect(status.counters.pending_questions).toBe(0);expect(status.counters.newly_reviewed).toBe(1);expect(status.counters.reused_answer_bindings).toBe(1);
  const member=await env.DB.prepare('SELECT evidence_hash FROM review_operation_packages WHERE operation_id=?').bind(o.id).first<any>();expect(member.evidence_hash).toBe('a'.repeat(64));
 });
+it('amends proven completed labels in an immutable revision without repeating reviews or changing the first export',async()=>{
+ await seed('op_amend',adjacent,false);const o=await op('amend',{apply_reviews:true});await bootstrapReviewOperation(env,o.id,{packages:[{package_name:'op_amend'}]});
+ const packet=await claimReviewPacket(env,o.id,'claim',{reviewer:'A'}) as any;
+ await submitReviewResults(env,o.id,{lease_key:packet.lease_key,results:[{package_name:'op_amend',finding:'Inbound only.',sources:[{url:'https://pub.dev/packages/op_amend'}],envelope:{package_name:'op_amend',evidence_hash:'a'.repeat(64),product_commit:catalog.source_commit,reviewed_by:'A',decision:adjacent}}]});
+ await env.DB.prepare("UPDATE review_operation_resources SET status='reused' WHERE operation_id=?").bind(o.id).run();
+ await env.DB.prepare("UPDATE review_operations SET counters_json=json_set(counters_json,'$.pending_resources',0) WHERE id=?").bind(o.id).run();
+ await env.DB.prepare("UPDATE review_operation_packages SET disposition='pending_review' WHERE operation_id=?").bind(o.id).run();
+ await materializeReviewReport(env,o.id);const original=await env.DB.prepare("SELECT content_hash FROM review_operation_artifacts WHERE operation_id=? AND format='json'").bind(o.id).first<any>();
+ expect(await finalizeReviewOperation(env,o.id,{amend_dispositions:true,reason:'Saved answer is complete; repair bookkeeping label.'})).toMatchObject({revision:2,corrected_labels:1});
+ const pending=await handleReviewOperations(new Request(`https://test/api/v1/admin/competitors/review-operations/${o.id}/report?format=json&revision=2`),env,`/api/v1/admin/competitors/review-operations/${o.id}/report`,'read');expect(pending.status).toBe(409);
+ await env.DB.prepare("UPDATE review_operations SET status='quota_deferred' WHERE id=?").bind(o.id).run();
+ expect(await finalizeReviewOperation(env,o.id,{amend_dispositions:true,resume:true,reason:'Explicitly resume after quota reset.'})).toMatchObject({status:'amending',revision:2});
+ const fetcher=vi.spyOn(globalThis,'fetch');await materializeReviewReport(env,o.id,2);await materializeReviewReport(env,o.id,2);expect(fetcher).not.toHaveBeenCalled();
+ const first=await env.DB.prepare("SELECT content_hash FROM review_operation_artifacts WHERE operation_id=? AND format='json'").bind(o.id).first<any>();expect(first).toEqual(original);
+ const response=await handleReviewOperations(new Request(`https://test/api/v1/admin/competitors/review-operations/${o.id}/report?format=json&revision=2`),env,`/api/v1/admin/competitors/review-operations/${o.id}/report`,'read');const revised=await response.json() as any;
+ expect(revised.packages[0].disposition).toBe('reviewed');expect(revised.dispositions.pending_review).toBeUndefined();expect(revised.counters.newly_reviewed).toBe(1);
+});
+it('refuses finalization with an unfinished membership even when the question counter is zero',async()=>{
+ const o=await op('orphan-membership');await env.DB.prepare("INSERT INTO review_operation_packages(operation_id,package_name,disposition,relationship,updated_at) VALUES(?,'op_orphan','pending_review','unknown','2026')").bind(o.id).run();
+ await expect(finalizeReviewOperation(env,o.id,{})).rejects.toThrow('Unfinished package disposition');
+});

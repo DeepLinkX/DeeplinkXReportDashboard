@@ -79,7 +79,7 @@ async function handleQueueMessage(
       try { await processReviewResource(env,message.body.operationId,message.body.packageName,message.body.resourceKind,message.body.version); }
       catch(error) { if(isD1DailyQuotaError(error))throw error; if(await deferPubdev(message,env,error))return; throw error; }
       await invalidatePublicCache(context,env,[MUTABLE_CACHE_TAG]);
-    } else await materializeReviewReport(env,message.body.operationId);
+    } else await materializeReviewReport(env,message.body.operationId,message.body.revision);
     message.ack();return;
   }
   if (message.body.kind === "start-operation") {

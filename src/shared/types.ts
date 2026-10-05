@@ -97,7 +97,7 @@ export interface StartupMessage {
   requestedAt: string;
   request: StartupRequest;
 }
-export type ReviewQueueMessage = { kind: "review-dispatch"; operationId: string; stopOnQuota: boolean } | { kind: "review-resource"; operationId: string; packageName: string; resourceKind: string; version: string } | { kind: "review-finalize"; operationId: string; stopOnQuota?: boolean };
+export type ReviewQueueMessage = { kind: "review-dispatch"; operationId: string; stopOnQuota: boolean } | { kind: "review-resource"; operationId: string; packageName: string; resourceKind: string; version: string } | { kind: "review-finalize"; operationId: string; stopOnQuota?: boolean; revision?: number };
 export type AuditQueueMessage = ReviewQueueMessage | ScanQueryMessage | FinalizeRunMessage | EnrichCompetitorMessage | IntelligenceMessage | StartupMessage | { kind: "classify-competitors"; runId: string };
 
 export interface SearchPackage {

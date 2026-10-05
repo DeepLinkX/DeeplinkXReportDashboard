@@ -472,3 +472,14 @@ answer or answered question proves the current evidence hash. A bounded
 `reconciling` response means repeat finalization with a new idempotency key;
 genuinely changed supporting evidence still opens a targeted question. Reuse
 repairs are counted separately and do not count as new semantic reviews.
+
+Completed review artifacts can receive an explicit disposition-only amendment
+through protected finalization with `amend_dispositions: true` and a reason.
+Only already-imported, evidence-bound answers qualify; no resource fetch or
+semantic review occurs. The Worker derives a new immutable revision from the
+original snapshot, keeps the original export bytes, and refuses finalization
+when unfinished membership labels remain. Read revisions explicitly with
+`report?format=json&revision=2` or the helper's `remote report --revision 2`.
+An interrupted amendment can be redispatched with the same amendment options
+and `resume: true` using a new request key; stored chunks are reused.
+Amendments read a bounded frozen source artifact of at most 15 MB.
